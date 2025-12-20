@@ -9,5 +9,7 @@
         "coverage": true,
         "**/node_modules": true
     },
-    "eslint.enable": false
+    "eslint.enable": false,
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python-envs.pythonProjects": []
 }
