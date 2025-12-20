@@ -1,0 +1,700 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Union,
+)
+
+# ─────────────────────────────────────────────────────────────
+# Basic enums & small helper types
+# ─────────────────────────────────────────────────────────────
+
+
+class AgentId(str, Enum):
+    """Identifier for an agent in Bomberland.
+
+    Official values:
+        * "a" - Agent A
+        * "b" - Agent B
+    """
+
+    A = "a"
+    B = "b"
+
+
+class Role(str, Enum):
+    """Connection role used when talking to the game server."""
+
+    AGENT = "agent"
+    SPECTATOR = "spectator"
+    ADMIN = "admin"
+
+
+class MoveDirection(str, Enum):
+    """Cardinal directions used in movement action packets."""
+
+    UP = "up"
+    DOWN = "down"
+    LEFT = "left"
+    RIGHT = "right"
+
+
+class EntityType(str, Enum):
+    """Type of an entity in the `entities` list.
+
+    See the Bomberland docs "Game Entities" section.
+    """
+
+    AMMO = "a"  # Ammunition pickup
+    BOMB = "b"  # Bomb
+    BLAST = "x"  # Blast / end-game fire
+    BLAST_POWERUP = "bp"  # Blast radius powerup
+    FREEZE_POWERUP = "fp"  # Freeze powerup
+    METAL_BLOCK = "m"  # Metal (indestructible)
+    ORE_BLOCK = "o"  # Ore (3 HP)
+    WOOD_BLOCK = "w"  # Wooden (1 HP)
+
+
+@dataclass
+class Point:
+    """2D grid coordinate in the Bomberland world.
+
+    Coordinates follow the engine convention: [x, y].
+    """
+
+    x: int
+    y: int
+
+    @classmethod
+    def from_sequence(cls, seq: Iterable[Union[int, float]]) -> "Point":
+        """Create a Point from a JSON coordinate list, e.g. [3, 10]."""
+        x, y = list(seq)
+        return cls(int(x), int(y))
+
+    def as_list(self) -> List[int]:
+        """Return coordinates in the JSON-compatible [x, y] format."""
+        return [self.x, self.y]
+
+
+# ─────────────────────────────────────────────────────────────
+# Core game objects
+# ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Inventory:
+    """Inventory for a unit.
+
+    Attributes
+    ----------
+    bombs:
+        Number of bombs available to place (ammunition).
+        In Bomberland v4 this is effectively infinite, but the
+        server still reports a value for compatibility.
+    """
+
+    bombs: int = 0
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Inventory":
+        return cls(bombs=int(data.get("bombs", 0)))
+
+
+@dataclass
+class UnitState:
+    """State of a single unit (player-controlled character).
+
+    This corresponds to one entry in the `unit_state` object.
+
+    Attributes
+    ----------
+    unit_id:
+        Unique identifier for this unit (e.g. "c", "d", "e"...).
+    agent_id:
+        ID of the owning agent ("a" or "b").
+    position:
+        Current location of the unit as a Point [x, y].
+    hp:
+        Current health points of the unit.
+    inventory:
+        Inventory data, currently only bombs.
+    blast_diameter:
+        Blast diameter for bombs placed by this unit.
+    invulnerable_until:
+        Latest tick number (inclusive) during which the unit
+        is invulnerable. If current tick <= this value, the unit
+        will not take damage.
+    stunned_until:
+        Latest tick number (inclusive) during which the unit
+        is stunned. If current tick <= this value, the unit
+        cannot move or perform actions.
+    """
+
+    unit_id: str
+    agent_id: AgentId
+    position: Point
+    hp: int
+    inventory: Inventory
+    blast_diameter: int
+    invulnerable_until: int
+    stunned_until: int
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "UnitState":
+        """Parse a `unit_state[unit_id]` JSON object into UnitState."""
+        coords = data.get("coordinates", [0, 0])
+        position = Point.from_sequence(coords)
+
+        inventory = Inventory.from_dict(data.get("inventory", {}))
+
+        return cls(
+            unit_id=str(data.get("unit_id")),
+            agent_id=AgentId(str(data.get("agent_id"))),
+            position=position,
+            hp=int(data.get("hp", 0)),
+            inventory=inventory,
+            blast_diameter=int(data.get("blast_diameter", 0)),
+            invulnerable_until=int(data.get("invulnerable", 0)),
+            stunned_until=int(data.get("stunned", 0)),
+        )
+
+    # Convenience helpers for agent code:
+
+    @property
+    def x(self) -> int:
+        """Shortcut for self.position.x."""
+        return self.position.x
+
+    @property
+    def y(self) -> int:
+        """Shortcut for self.position.y."""
+        return self.position.y
+
+    def is_alive(self) -> bool:
+        """Return True if the unit has at least 1 HP."""
+        return self.hp > 0
+
+    def is_invulnerable(self, tick: int) -> bool:
+        """Return True if the unit is invulnerable at the given tick."""
+        return tick <= self.invulnerable_until
+
+    def is_stunned(self, tick: int) -> bool:
+        """Return True if the unit is stunned at the given tick."""
+        return tick <= self.stunned_until
+
+
+@dataclass
+class Agent:
+    """Agent-level information.
+
+    This corresponds to each entry in the `agents` object.
+
+    Attributes
+    ----------
+    agent_id:
+        Agent identifier ("a" or "b").
+    unit_ids:
+        IDs of the units controlled by this agent.
+    """
+
+    agent_id: AgentId
+    unit_ids: List[str]
+
+    @classmethod
+    def from_dict(cls, agent_id: str, data: Mapping[str, Any]) -> "Agent":
+        return cls(
+            agent_id=AgentId(agent_id),
+            unit_ids=list(data.get("unit_ids", [])),
+        )
+
+
+@dataclass
+class Entity:
+    """Representation of a non-unit object on the map (`entities` array).
+
+    Depending on the `type`, different fields may be present. All optional
+    attributes default to None when not applicable.
+
+    Attributes
+    ----------
+    created:
+        Tick on which this entity was created (0 if part of the initial world).
+    position:
+        Location of the entity on the grid.
+    entity_type:
+        Type of entity (bomb, block, powerup, blast, etc.).
+    expires:
+        Tick on which this entity will disappear or explode
+        (only for bombs, powerups, blasts, etc.).
+    hp:
+        Hit points remaining before the entity is destroyed
+        (for destructible blocks, powerups, etc.).
+    owner_unit_id:
+        Unit that owns this entity (e.g. the unit that placed a bomb
+        or whose blast this is). Some entities will not have an owner.
+    blast_diameter:
+        Blast diameter if this entity is a bomb.
+    """
+
+    created: int
+    position: Point
+    entity_type: EntityType
+    expires: Optional[int] = None
+    hp: Optional[int] = None
+    owner_unit_id: Optional[str] = None
+    blast_diameter: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Entity":
+        """Parse an entry from the `entities` list."""
+        position = Point(int(data.get("x", 0)), int(data.get("y", 0)))
+        raw_type = str(data.get("type"))
+        entity_type = EntityType(raw_type)
+
+        # Historically this has been called both "owner_unit_id" and "unit_id"
+        owner_unit_id = (
+            data.get("owner_unit_id")
+            or data.get("unit_id")  # fall back to older field name
+        )
+
+        expires = data.get("expires")
+        hp = data.get("hp")
+        blast_diameter = data.get("blast_diameter")
+
+        return cls(
+            created=int(data.get("created", 0)),
+            position=position,
+            entity_type=entity_type,
+            expires=int(expires) if expires is not None else None,
+            hp=int(hp) if hp is not None else None,
+            owner_unit_id=str(owner_unit_id) if owner_unit_id is not None else None,
+            blast_diameter=int(blast_diameter) if blast_diameter is not None else None,
+        )
+
+    # UX helpers for pathfinding / reasoning:
+
+    @property
+    def x(self) -> int:
+        return self.position.x
+
+    @property
+    def y(self) -> int:
+        return self.position.y
+
+    def is_solid(self) -> bool:
+        """Return True if units cannot move through this entity."""
+        return self.entity_type in {
+            EntityType.METAL_BLOCK,
+            EntityType.ORE_BLOCK,
+            EntityType.WOOD_BLOCK,
+            EntityType.BOMB,
+        }
+
+    def is_pickup(self) -> bool:
+        """Return True if this entity is a pickup (powerup/ammo)."""
+        return self.entity_type in {
+            EntityType.AMMO,
+            EntityType.BLAST_POWERUP,
+            EntityType.FREEZE_POWERUP,
+        }
+
+    def is_dangerous(self) -> bool:
+        """Return True if standing on this tile is immediately dangerous.
+
+        This marks things like bombs and active blasts / end-game fire as
+        dangerous, but you may want additional logic based on timers.
+        """
+        return self.entity_type in {
+            EntityType.BOMB,
+            EntityType.BLAST,  # includes end-game fire
+        }
+
+
+@dataclass
+class World:
+    """Static information about the world grid.
+
+    Attributes
+    ----------
+    width:
+        Number of cells horizontally (default is 15).
+    height:
+        Number of cells vertically (default is 15).
+    """
+
+    width: int
+    height: int
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "World":
+        return cls(
+            width=int(data.get("width", 15)),
+            height=int(data.get("height", 15)),
+        )
+
+    def in_bounds(self, point: Point) -> bool:
+        """Return True if a point lies within the world boundaries."""
+        return 0 <= point.x < self.width and 0 <= point.y < self.height
+
+
+@dataclass
+class Config:
+    """Configuration settings for the game environment.
+
+    These values come from the `config` object in `game_state`.
+    """
+
+    tick_rate_hz: int
+    game_duration_ticks: int
+    fire_spawn_interval_ticks: int
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Config":
+        return cls(
+            tick_rate_hz=int(data.get("tick_rate_hz", 10)),
+            game_duration_ticks=int(data.get("game_duration_ticks", 1800)),
+            fire_spawn_interval_ticks=int(data.get("fire_spawn_interval_ticks", 5)),
+        )
+
+
+@dataclass
+class Connection:
+    """Information about your agent's connection.
+
+    Attributes
+    ----------
+    id:
+        Connection ID used internally by tournament servers.
+    role:
+        Role of the connection (agent, spectator, admin).
+    agent_id:
+        Which logical agent this connection controls ("a" or "b").
+    """
+
+    id: int
+    role: Role
+    agent_id: AgentId
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Connection":
+        return cls(
+            id=int(data.get("id", 0)),
+            role=Role(str(data.get("role", Role.AGENT.value))),
+            agent_id=AgentId(str(data.get("agent_id", AgentId.A.value))),
+        )
+
+
+# ─────────────────────────────────────────────────────────────
+# High-level GameState wrapper
+# ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class GameState:
+    """Typed wrapper around the Bomberland `game_state` JSON.
+
+    This is meant to be the single entry point for your agent code.
+    Use `GameState.from_dict(game_state)` each tick and then work with
+    attributes and helper methods instead of manual JSON indexing.
+
+    Attributes
+    ----------
+    agents:
+        Mapping from AgentId -> Agent object.
+    units:
+        Mapping from unit_id -> UnitState.
+    entities:
+        List of all non-unit entities on the map.
+    world:
+        World dimensions.
+    tick:
+        Current game tick.
+    config:
+        Game configuration.
+    connection:
+        Information about your connection (e.g. which agent you are).
+    """
+
+    agents: Dict[AgentId, Agent]
+    units: Dict[str, UnitState]
+    entities: List[Entity]
+    world: World
+    tick: int
+    config: Config
+    connection: Connection
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "GameState":
+        """Parse a raw `game_state` JSON object from the engine."""
+        # Agents
+        agents_raw = data.get("agents", {})
+        agents: Dict[AgentId, Agent] = {}
+        for agent_id_str, agent_data in agents_raw.items():
+            agent_id = AgentId(str(agent_id_str))
+            agents[agent_id] = Agent.from_dict(agent_id_str, agent_data)
+
+        # Units
+        units_raw = data.get("unit_state", {})
+        units: Dict[str, UnitState] = {
+            unit_id: UnitState.from_dict(unit_data)
+            for unit_id, unit_data in units_raw.items()
+        }
+
+        # Entities
+        entities_raw = data.get("entities", []) or []
+        entities: List[Entity] = [Entity.from_dict(e) for e in entities_raw]
+
+        world = World.from_dict(data.get("world", {}))
+        config = Config.from_dict(data.get("config", {}))
+        connection = Connection.from_dict(data.get("connection", {}))
+        tick = int(data.get("tick", 0))
+
+        return cls(
+            agents=agents,
+            units=units,
+            entities=entities,
+            world=world,
+            tick=tick,
+            config=config,
+            connection=connection,
+        )
+
+    # ------------- Agent-centric helpers -------------
+
+    @property
+    def my_agent_id(self) -> AgentId:
+        """AgentId controlled by this connection."""
+        return self.connection.agent_id
+
+    @property
+    def my_agent(self) -> Agent:
+        """Agent object for the current connection."""
+        return self.agents[self.my_agent_id]
+
+    @property
+    def enemy_agent_id(self) -> AgentId:
+        """The other AgentId (assuming 2-player game)."""
+        return AgentId.B if self.my_agent_id == AgentId.A else AgentId.A
+
+    @property
+    def enemy_agent(self) -> Agent:
+        """Agent object for the opponent."""
+        return self.agents[self.enemy_agent_id]
+
+    @property
+    def my_units(self) -> List[UnitState]:
+        """List of unit states belonging to the current agent."""
+        return [self.units[uid] for uid in self.my_agent.unit_ids if uid in self.units]
+
+    @property
+    def enemy_units(self) -> List[UnitState]:
+        """List of unit states belonging to the opponent."""
+        return [
+            self.units[uid] for uid in self.enemy_agent.unit_ids if uid in self.units
+        ]
+
+    @property
+    def all_units(self) -> List[UnitState]:
+        """All known units (both agents)."""
+        return list(self.units.values())
+
+    @property
+    def alive_units(self) -> List[UnitState]:
+        """All units that currently have >0 HP."""
+        return [u for u in self.all_units if u.is_alive()]
+
+    @property
+    def my_alive_units(self) -> List[UnitState]:
+        """Units belonging to the current agent that are still alive."""
+        return [u for u in self.my_units if u.is_alive()]
+
+    @property
+    def enemy_alive_units(self) -> List[UnitState]:
+        """Units belonging to the opponent that are still alive."""
+        return [u for u in self.enemy_units if u.is_alive()]
+
+    def get_unit(self, unit_id: str) -> Optional[UnitState]:
+        """Get a unit by ID, or None if it doesn't exist in this state."""
+        return self.units.get(unit_id)
+
+    # ------------- Entity lookup helpers -------------
+
+    def entities_of_type(self, entity_type: EntityType) -> List[Entity]:
+        """Return all entities with the given EntityType."""
+        return [e for e in self.entities if e.entity_type == entity_type]
+
+    def entities_at(
+        self,
+        x: int,
+        y: int,
+        types: Optional[Iterable[EntityType]] = None,
+    ) -> List[Entity]:
+        """Return entities at a given coordinate.
+
+        Parameters
+        ----------
+        x, y:
+            Coordinate of interest.
+        types:
+            Optional iterable of EntityType values to filter by.
+        """
+        point = Point(x, y)
+        if not self.world.in_bounds(point):
+            return []
+
+        result = [e for e in self.entities if e.x == x and e.y == y]
+        if types is not None:
+            type_set = set(types)
+            result = [e for e in result if e.entity_type in type_set]
+        return result
+
+    def is_walkable(self, x: int, y: int, ignore_bombs: bool = False) -> bool:
+        """Return True if a unit can move into tile (x, y).
+
+        This checks world bounds and solid entities. By default bombs
+        are considered blocking. Set `ignore_bombs=True` if you want to
+        consider bombs as walkable (e.g. for planning via bomb timing).
+        """
+        point = Point(x, y)
+        if not self.world.in_bounds(point):
+            return False
+
+        entities_here = self.entities_at(x, y)
+        for e in entities_here:
+            if e.entity_type in {
+                EntityType.METAL_BLOCK,
+                EntityType.ORE_BLOCK,
+                EntityType.WOOD_BLOCK,
+            }:
+                return False
+            if not ignore_bombs and e.entity_type == EntityType.BOMB:
+                return False
+        return True
+
+    def is_dangerous_tile(self, x: int, y: int) -> bool:
+        """Return True if the tile contains obviously dangerous entities.
+
+        This is a simple helper that checks bombs and current blasts.
+        You may want to extend this logic to look at timers when doing
+        more advanced planning.
+        """
+        entities_here = self.entities_at(x, y)
+        return any(e.is_dangerous() for e in entities_here)
+
+
+# ─────────────────────────────────────────────────────────────
+# Action packet dataclasses
+# ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ActionPacket:
+    """Base class for all agent action packets.
+
+    You normally won't instantiate this directly; instead use one of
+    the concrete subclasses like BombAction, MoveAction, etc.
+
+    Subclasses must implement `to_dict()` to produce a JSON packet
+    that matches `ValidAgentPacket` in the engine schema.
+    """
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a dict suitable for sending over the websocket."""
+        raise NotImplementedError
+
+
+@dataclass
+class BombAction(ActionPacket):
+    """Action: place a bomb with a specific unit.
+
+    JSON form:
+        {"type": "bomb", "unit_id": "<unit_id>"}
+    """
+
+    unit_id: str
+    type: str = field(init=False, default="bomb")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type,
+            "unit_id": self.unit_id,
+        }
+
+
+@dataclass
+class MoveAction(ActionPacket):
+    """Action: move a unit in a cardinal direction.
+
+    JSON form:
+        {"type": "move", "move": "up" | "down" | "left" | "right",
+         "unit_id": "<unit_id>"}
+    """
+
+    unit_id: str
+    move: MoveDirection
+    type: str = field(init=False, default="move")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type,
+            "move": self.move.value,
+            "unit_id": self.unit_id,
+        }
+
+
+@dataclass
+class DetonateAction(ActionPacket):
+    """Action: remotely detonate a bomb at given coordinates.
+
+    JSON form:
+        {"type": "detonate", "coordinates": [x, y], "unit_id": "<unit_id>"}
+    """
+
+    unit_id: str
+    target: Point
+    type: str = field(init=False, default="detonate")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type,
+            "coordinates": self.target.as_list(),
+            "unit_id": self.unit_id,
+        }
+
+
+@dataclass
+class RequestTickAction(ActionPacket):
+    """Admin-only action: request the next tick in training mode.
+
+    JSON form:
+        {"type": "request_tick"}
+    """
+
+    type: str = field(init=False, default="request_tick")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"type": self.type}
+
+
+# ─────────────────────────────────────────────────────────────
+# Small top-level helper
+# ─────────────────────────────────────────────────────────────
+
+
+def parse_game_state(raw: Mapping[str, Any]) -> GameState:
+    """Convenience function to parse a raw `game_state` dict.
+
+    Example
+    -------
+    >>> state = parse_game_state(game_state)
+    >>> for unit in state.my_units:
+    ...     print(unit.unit_id, unit.position, unit.hp)
+    """
+    return GameState.from_dict(raw)
