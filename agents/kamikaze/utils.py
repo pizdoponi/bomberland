@@ -18,7 +18,7 @@ def shortest_path_to_enemy(
         - Moving into a tile containing destructible obstacles (wood / ore) costs:
               1 (move) + (1 bomb + 2 retreat + 1 detonate + 2 return) * hp
             = 1 + 6 * hp
-        - Tiles with metal blocks or bombs are treated as impassable.
+        - Tiles with metal blocks are treated as impassable.
         - Tiles occupied by other units (besides the enemy target) are impassable.
 
     Returns:
@@ -57,10 +57,9 @@ def shortest_path_to_enemy(
 
         entities = game_state.entities_at(x, y)
 
-        # Hard-block: metal & bombs are not traversable
+        # Hard-block: metal is not traversable
         has_metal = any(e.entity_type == EntityType.METAL_BLOCK for e in entities)
-        has_bomb = any(e.entity_type == EntityType.BOMB for e in entities)
-        if has_metal or has_bomb:
+        if has_metal:
             return None
 
         # Sum HP of destructible obstacles (wood / ore) on this tile
