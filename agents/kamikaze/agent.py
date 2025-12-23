@@ -5,7 +5,11 @@ import time
 
 from game_state import GameState as _GameState
 from types_ import *  # pyright: ignore[reportAssignmentType]  # noqa: F403
-from utils import is_any_enemy_in_my_armed_blast_radius, shortest_path_to_enemy
+from utils import (
+    direction_from_to,
+    is_any_enemy_in_my_armed_blast_radius,
+    shortest_path_to_enemy,
+)
 
 uri = os.environ.get(
     'GAME_CONNECTION_STRING') or "ws://127.0.0.1:3000/?role=agent&agentId=agentId&name=defaultName"
@@ -44,7 +48,7 @@ class Agent():
         my_units = game_state.my_alive_units
         enemy_units = game_state.enemy_alive_units
         
-        my_units_kills_enemy_unit: dict[UnitState, UnitState] = {my_unit: enemy_units[i % len(enemy_units)] for i, my_unit in enumerate(my_units)}
+        my_units_enemy_targets: dict[UnitState, UnitState] = {my_unit: enemy_units[i % len(enemy_units)] for i, my_unit in enumerate(my_units)}
 
         for unit in my_units:
             unit_id = unit.unit_id
@@ -53,6 +57,8 @@ class Agent():
             enemy_to_kill, bomb_position = is_any_enemy_in_my_armed_blast_radius(game_state, armed_ticks=5)
             if enemy_to_kill is not None:
                 assert bomb_position is not None, "If there is an enemy to kill, bomb_position should be returned to know which bomb to denotate."
+                # reset next moves
+                self.units_next_actions[unit] = []
                 await self._client.send_detonate(bomb_position.x, bomb_position.y, unit_id)
             
             # if there are any premoves, execute them
@@ -64,7 +70,7 @@ class Agent():
                 path = shortest_path_to_enemy(
                     game_state,
                     unit,
-                    my_units_kills_enemy_unit[unit],
+                    my_units_enemy_targets[unit],
                 )
                 
                 # place a bomb if we are next to the enemy
@@ -76,11 +82,9 @@ class Agent():
                 elif path is not None and len(path) > 1:
                     next_point = path[1]
                     if game_state.is_walkable(next_point.x, next_point.y):
-                        await self._client.send_move(
-                            next_point.x,
-                            next_point.y,
-                            unit_id,
-                        )
+                        direction = direction_from_to(unit.position, next_point)
+                        if direction is not None:
+                            await self._client.send_move(direction, unit_id)
 
 
 def main():
