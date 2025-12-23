@@ -189,6 +189,9 @@ class UnitState:
         """Return True if the unit is stunned at the given tick."""
         return tick <= self.stunned_until
 
+    def __hash__(self):
+        return hash(self.unit_id)
+
 
 @dataclass
 class Agent:
@@ -647,6 +650,37 @@ class MoveAction(ActionPacket):
             "move": self.move.value,
             "unit_id": self.unit_id,
         }
+
+    @staticmethod
+    def from_direction(unit_id: str, direction: str) -> "MoveAction":
+        """Create a MoveAction from a string direction."""
+        return MoveAction(unit_id=unit_id, move=MoveDirection(direction))
+
+    @staticmethod
+    def get_direction(
+        unit_id: str, current: Point, next: Point
+    ) -> Optional["MoveAction"]:
+        """Create a MoveAction from current and next Point positions."""
+        if next.x == current.x + 1 and next.y == current.y:
+            return MoveAction(unit_id=unit_id, move=MoveDirection.RIGHT)
+        elif next.x == current.x - 1 and next.y == current.y:
+            return MoveAction(unit_id=unit_id, move=MoveDirection.LEFT)
+        elif next.x == current.x and next.y == current.y + 1:
+            return MoveAction(unit_id=unit_id, move=MoveDirection.DOWN)
+        elif next.x == current.x and next.y == current.y - 1:
+            return MoveAction(unit_id=unit_id, move=MoveDirection.UP)
+        else:
+            return None
+
+    @staticmethod
+    def from_points(
+        unit_id: str, current: Point, next: Point
+    ) -> Optional["MoveAction"]:
+        """Create a MoveAction from current and next Point positions."""
+        direction = MoveAction.get_direction(unit_id, current, next)
+        if direction is None:
+            return None
+        return MoveAction(unit_id=unit_id, move=direction.move)
 
 
 @dataclass
