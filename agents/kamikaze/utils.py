@@ -1,7 +1,136 @@
 import heapq
-from typing import Dict, List, Optional, Tuple
+from collections import deque
+from typing import Dict, List, Optional, Set, Tuple
 
 from types_ import EntityType, GameState, Point, UnitState
+
+
+def direction_from_to(current: Point, nxt: Point) -> Optional[str]:
+    """
+    Return a move direction ("up", "down", "left", "right") from current to nxt,
+    or None if they are not 4-neighbour adjacent.
+    """
+    dx = nxt.x - current.x
+    dy = nxt.y - current.y
+    if dx == 1 and dy == 0:
+        return "right"
+    if dx == -1 and dy == 0:
+        return "left"
+    if dx == 0 and dy == 1:
+        return "down"
+    if dx == 0 and dy == -1:
+        return "up"
+    return None
+
+
+def shortest_path_to_safe_square_after_bomb(
+    game_state: GameState,
+    my_unit: UnitState,
+    bomb_position: Point,
+    blast_diameter: Optional[int] = None,
+) -> Optional[List[Point]]:
+    """
+    Find the shortest path to a walkable, safe tile after placing a bomb.
+
+    A tile is considered safe if it is outside the bomb's blast radius and
+    does not contain obviously dangerous entities (bombs/blasts).
+    """
+    start = my_unit.position
+
+    if blast_diameter is None:
+        blast_diameter = my_unit.blast_diameter or 3
+
+    width, height = game_state.world.width, game_state.world.height
+    solid_blocks = {
+        EntityType.METAL_BLOCK,
+        EntityType.ORE_BLOCK,
+        EntityType.WOOD_BLOCK,
+    }
+
+    # Pre-compute blocked unit positions (all units except my_unit)
+    blocked_unit_positions = set()
+    for u in game_state.all_units:
+        if u.unit_id == my_unit.unit_id:
+            continue
+        if u.is_alive():
+            blocked_unit_positions.add((u.x, u.y))
+
+    def in_bounds(x: int, y: int) -> bool:
+        return 0 <= x < width and 0 <= y < height
+
+    def bomb_blast_tiles() -> Set[Tuple[int, int]]:
+        tiles: Set[Tuple[int, int]] = set()
+        bx, by = bomb_position.x, bomb_position.y
+        tiles.add((bx, by))
+
+        radius = max(0, (blast_diameter - 1) // 2)
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            for step in range(1, radius + 1):
+                x = bx + dx * step
+                y = by + dy * step
+                if not in_bounds(x, y):
+                    break
+                tiles.add((x, y))
+                entities_here = game_state.entities_at(x, y)
+                if any(e.entity_type in solid_blocks for e in entities_here):
+                    break
+        return tiles
+
+    blast_tiles = bomb_blast_tiles()
+
+    def is_safe(x: int, y: int) -> bool:
+        return (x, y) not in blast_tiles and not game_state.is_dangerous_tile(x, y)
+
+    def can_traverse(x: int, y: int) -> bool:
+        if not in_bounds(x, y):
+            return False
+        if (x, y) in blocked_unit_positions:
+            return False
+        return game_state.is_walkable(x, y, ignore_bombs=True)
+
+    # BFS for shortest path in number of moves
+    start_key = (start.x, start.y)
+    queue = deque([start_key])
+    parent: Dict[Tuple[int, int], Tuple[int, int]] = {}
+    visited = {start_key}
+
+    # Early exit if we're already safe
+    if is_safe(start.x, start.y):
+        return [start]
+
+    neighbors = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+    target_key: Optional[Tuple[int, int]] = None
+
+    while queue:
+        x, y = queue.popleft()
+        for dx, dy in neighbors:
+            nx, ny = x + dx, y + dy
+            nkey = (nx, ny)
+            if nkey in visited:
+                continue
+            if not can_traverse(nx, ny):
+                continue
+            visited.add(nkey)
+            parent[nkey] = (x, y)
+            if is_safe(nx, ny):
+                target_key = nkey
+                queue.clear()
+                break
+            queue.append(nkey)
+
+    if target_key is None:
+        return None
+
+    # Reconstruct path from target back to start
+    path_coords: List[Tuple[int, int]] = []
+    cur = target_key
+    while cur != start_key:
+        path_coords.append(cur)
+        cur = parent[cur]
+    path_coords.append(start_key)
+    path_coords.reverse()
+
+    return [Point(x, y) for (x, y) in path_coords]
 
 
 def shortest_path_to_enemy(
