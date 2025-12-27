@@ -563,16 +563,28 @@ class GameState:
             result = [e for e in result if e.entity_type in type_set]
         return result
 
-    def is_walkable(self, x: int, y: int, ignore_bombs: bool = False) -> bool:
+    def is_walkable(
+        self,
+        x: int,
+        y: int,
+        ignore_bombs: bool = False,
+        ignore_units: bool = False,
+    ) -> bool:
         """Return True if a unit can move into tile (x, y).
 
         This checks world bounds and solid entities. By default bombs
         are considered blocking. Set `ignore_bombs=True` if you want to
         consider bombs as walkable (e.g. for planning via bomb timing).
+        Set `ignore_units=True` to ignore other living units on the tile.
         """
         point = Point(x, y)
         if not self.world.in_bounds(point):
             return False
+
+        if not ignore_units:
+            for u in self.all_units:
+                if u.is_alive() and u.x == x and u.y == y:
+                    return False
 
         entities_here = self.entities_at(x, y)
         for e in entities_here:
