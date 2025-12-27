@@ -68,8 +68,8 @@ class Agent():
 
     async def _on_game_tick(self, tick_number, game_state):
         game_state = GameState.from_dict(game_state)
-        
-        if tick_number == 0:
+
+        if tick_number == 1:
             self.units_next_actions = {my_unit: [] for my_unit in game_state.my_units}
             self.units_bombs = {my_unit: [] for my_unit in game_state.my_units}
             self.units_move_history = {my_unit: [] for my_unit in game_state.my_units}
