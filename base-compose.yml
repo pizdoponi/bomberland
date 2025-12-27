@@ -7,10 +7,26 @@ services:
               source: ./agents/replay.json
               target: /app/replay.json
 
-    go-agent:
+    bombwalker-agent:
         build:
-            context: agents/go
-            dockerfile: Dockerfile
+            context: agents/bombwalker
+            dockerfile: Dockerfile.dev
+        volumes:
+            - ./agents/bombwalker:/app
+
+    heureka:
+        build:
+            context: agents/heureka
+            dockerfile: Dockerfile.dev
+        volumes:
+            - ./agents/heureka:/app
+
+    kamikaze:
+        build:
+            context: agents/kamikaze
+            dockerfile: Dockerfile.dev
+        volumes:
+            - ./agents/kamikaze:/app
 
     python3-agent:
         build:
@@ -41,25 +57,3 @@ services:
             dockerfile: Dockerfile.gym.dev
         volumes:
             - ./agents/python3:/app
-
-    typescript-agent:
-        build:
-            context: agents/typescript
-            dockerfile: Dockerfile
-
-    typescript-agent-dev:
-        build:
-            context: agents/typescript
-            dockerfile: Dockerfile.dev
-        volumes:
-            - ./agents/typescript:/app
-
-    cpp-agent:
-        build:
-            context: agents/cpp
-            dockerfile: Dockerfile
-
-    rust-agent:
-        build:
-            context: agents/rust
-            dockerfile: Dockerfile
