@@ -107,7 +107,7 @@ class Inventory:
         return cls(bombs=int(data.get("bombs", 0)))
 
 
-@dataclass
+@dataclass(eq=False)
 class UnitState:
     """State of a single unit (player-controlled character).
 
@@ -191,6 +191,11 @@ class UnitState:
 
     def __hash__(self):
         return hash(self.unit_id)
+
+    def __eq__(self, other):
+        if not isinstance(other, UnitState):
+            return False
+        return self.unit_id == other.unit_id
 
 
 @dataclass
