@@ -109,7 +109,7 @@ class Agent():
             if len(self.units_next_actions[unit]) > 0:
                 action_packet = self.units_next_actions[unit].pop(0)
                 logger.info(f"Unit {unit.unit_id} executing premove: {action_packet}")
-                await self._client._send(action_packet)
+                await self._client._send(action_packet.to_dict())
 
             # if the bomb is already placed, skip. Wait for detonation
             elif len(self.units_bombs[unit]) > 0:
@@ -151,7 +151,7 @@ class Agent():
                                 f"Unit {unit.unit_id} moving towards enemy {my_units_enemy_targets[unit].unit_id} to {next_point}."
                             )
                             self.units_move_history[unit].append(unit.position)
-                            await self._client._send(next_move)
+                            await self._client._send(next_move.to_dict())
 
                     else:
                         # place bomb, retreat, boom
