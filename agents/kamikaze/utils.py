@@ -265,10 +265,7 @@ def is_enemy_in_my_armed_blast_radius(
             METAL_BLOCK, ORE_BLOCK, WOOD_BLOCK.
         - If the enemy stands on the bomb tile itself, they're in range.
     """
-    tick = game_state.tick
-    my_agent = game_state.my_agent
-    my_unit_ids = set(my_agent.unit_ids)
-    enemy_x, enemy_y = enemy_unit.x, enemy_unit.y
+    my_unit_ids = set(game_state.my_agent.unit_ids)
 
     # For convenience
     world = game_state.world
@@ -288,13 +285,13 @@ def is_enemy_in_my_armed_blast_radius(
 
     for bomb in my_bombs:
         # Check if bomb is armed long enough to be remotely detonated
-        if tick < bomb.created + armed_ticks:
+        if game_state.tick < bomb.created + armed_ticks:
             continue
 
         bx, by = bomb.x, bomb.y
 
         # If enemy stands on the bomb tile itself, it will be hit
-        if enemy_x == bx and enemy_y == by:
+        if enemy_unit.x == bx and enemy_unit.y == by:
             return True, Point(bx, by)
 
         # Determine blast diameter / radius
@@ -332,7 +329,7 @@ def is_enemy_in_my_armed_blast_radius(
                     break
 
                 # Check if enemy is on this tile
-                if enemy_x == x and enemy_y == y:
+                if enemy_unit.x == x and enemy_unit.y == y:
                     return True, Point(bx, by)
 
     return False, None
@@ -353,5 +350,5 @@ def is_any_enemy_in_my_armed_blast_radius(
             armed_ticks,
         )
         if is_enemy_killable:
-            return enemy_unit, bomb_position # type: ignore
+            return enemy_unit, bomb_position  # type: ignore
     return None, None
