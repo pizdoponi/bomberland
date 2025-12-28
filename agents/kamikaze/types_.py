@@ -695,9 +695,9 @@ class MoveAction(ActionPacket):
         elif next.x == current.x - 1 and next.y == current.y:
             return MoveAction(unit_id=unit_id, move=MoveDirection.LEFT)
         elif next.x == current.x and next.y == current.y + 1:
-            return MoveAction(unit_id=unit_id, move=MoveDirection.DOWN)
-        elif next.x == current.x and next.y == current.y - 1:
             return MoveAction(unit_id=unit_id, move=MoveDirection.UP)
+        elif next.x == current.x and next.y == current.y - 1:
+            return MoveAction(unit_id=unit_id, move=MoveDirection.DOWN)
         else:
             return None
 
