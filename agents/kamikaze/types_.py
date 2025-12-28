@@ -746,6 +746,28 @@ class RequestTickAction(ActionPacket):
         return {"type": self.type}
 
 
+@dataclass
+class SkipAction(ActionPacket):
+    """Action: skip the turn for a unit (do nothing).
+
+    JSON form:
+        {"type": "skip", "unit_id": "<unit_id>"}
+
+    #! WARNING: this is NOT an officially supported action in Bomberland!
+    It should thus never be sent to the server, it is only used internally
+    by agents to represent a no-op for a unit.
+    """
+
+    unit_id: str
+    type: str = field(init=False, default="skip")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type,
+            "unit_id": self.unit_id,
+        }
+
+
 # ─────────────────────────────────────────────────────────────
 # Small top-level helper
 # ─────────────────────────────────────────────────────────────
