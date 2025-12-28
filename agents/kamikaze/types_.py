@@ -149,19 +149,31 @@ class UnitState:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "UnitState":
         """Parse a `unit_state[unit_id]` JSON object into UnitState."""
-        coords = data.get("coordinates", [0, 0])
+        coords = data.get("coordinates") or data.get("coord") or [0, 0]
         position = Point.from_sequence(coords)
 
         inventory = Inventory.from_dict(data.get("inventory", {}))
 
+        agent_raw = data.get("agent_id")
+        if agent_raw is None:
+            agent_raw = data.get("owner_id")  # used in some update payloads
+
+        invulnerable_raw = data.get("invulnerable")
+        if invulnerable_raw is None:
+            invulnerable_raw = data.get("invulnerability")  # used in some update payloads
+
+        unit_id_raw = data.get("unit_id")
+        if unit_id_raw is None:
+            unit_id_raw = data.get("id")  # some payloads use "id"
+
         return cls(
-            unit_id=str(data.get("unit_id")),
-            agent_id=AgentId(str(data.get("agent_id"))),
+            unit_id=str(unit_id_raw),
+            agent_id=AgentId(str(agent_raw)),
             position=position,
             hp=int(data.get("hp", 0)),
             inventory=inventory,
             blast_diameter=int(data.get("blast_diameter", 0)),
-            invulnerable_until=int(data.get("invulnerable", 0)),
+            invulnerable_until=int(invulnerable_raw or 0),
             stunned_until=int(data.get("stunned", 0)),
         )
 
