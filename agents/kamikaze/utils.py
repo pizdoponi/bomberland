@@ -5,24 +5,6 @@ from typing import Dict, List, Optional, Set, Tuple
 from types_ import EntityType, GameState, Point, UnitState
 
 
-def direction_from_to(current: Point, nxt: Point) -> Optional[str]:
-    """
-    Return a move direction ("up", "down", "left", "right") from current to nxt,
-    or None if they are not 4-neighbour adjacent.
-    """
-    dx = nxt.x - current.x
-    dy = nxt.y - current.y
-    if dx == 1 and dy == 0:
-        return "right"
-    if dx == -1 and dy == 0:
-        return "left"
-    if dx == 0 and dy == 1:
-        return "down"
-    if dx == 0 and dy == -1:
-        return "up"
-    return None
-
-
 def shortest_path_to_safe_square_after_bomb(
     game_state: GameState,
     my_unit: UnitState,
