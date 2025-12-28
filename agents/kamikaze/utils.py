@@ -2,7 +2,7 @@ import heapq
 from collections import deque
 from typing import Dict, List, Optional, Set, Tuple
 
-from types_ import EntityType, GameState, Point, UnitState
+from types_ import Entity, EntityType, GameState, Point, UnitState
 
 
 def shortest_path_to_safe_square_after_bomb(
@@ -247,108 +247,81 @@ def shortest_path_to_enemy(
     return [Point(x, y) for (x, y) in path_coords]
 
 
-def is_enemy_in_my_armed_blast_radius(
+def is_enemy_unit_in_my_units_armed_bomb_radius(
     game_state: GameState,
+    my_unit: UnitState,
     enemy_unit: UnitState,
     armed_ticks: int = 5,
 ) -> Tuple[bool, Optional[Point]]:
     """
     Return True (and bomb position) if `enemy_unit` is in the blast radius of any bomb placed by
-    *our* agent and that bomb has been on the map for at least `armed_ticks`.
-
-    Rules used:
-        - A bomb is "ours" if its owner_unit_id belongs to our agent's unit_ids.
-        - A bomb is armable if: game_state.tick >= bomb.created + armed_ticks.
-        - Blast shape: cross (up, down, left, right) with radius derived from
-            bomb.blast_diameter (or owner unit's blast_diameter, or default=3).
-        - Blast propagation stops when it hits a solid block:
-            METAL_BLOCK, ORE_BLOCK, WOOD_BLOCK.
-        - If the enemy stands on the bomb tile itself, they're in range.
+    `my_unit` and that bomb has been on the map for at least `armed_ticks`, and there is no
+    obstacle between the bomb and the enemy unit.
     """
-    my_unit_ids = set(game_state.my_agent.unit_ids)
 
-    # For convenience
-    world = game_state.world
+    def is_in_bounds(x: int, y: int) -> bool:
+        """Return True if (x, y) is within world bounds."""
+        return 0 <= x < game_state.world.width and 0 <= y < game_state.world.height
 
-    def in_bounds(x: int, y: int) -> bool:
-        return 0 <= x < world.width and 0 <= y < world.height
+    def is_my_units_bomb(bomb: Entity) -> bool:
+        """Return True if bomb belongs to `my_unit`."""
+        assert bomb.entity_type == EntityType.BOMB, (
+            "is_my_units_bomb called on non-bomb entity."
+        )
+        return (
+            bomb.entity_type == EntityType.BOMB
+            and bomb.owner_unit_id == my_unit.unit_id
+        )
 
-    # Map from unit_id -> blast_diameter (for bombs missing blast_diameter)
-    unit_blast_map = {u.unit_id: u.blast_diameter for u in game_state.all_units}
+    def is_bomb_armed(bomb: Entity) -> bool:
+        """Return True if bomb has been on the map for at least `armed_ticks`."""
+        assert bomb.entity_type == EntityType.BOMB, (
+            "is_bomb_armed called on non-bomb entity."
+        )
+        return game_state.tick >= bomb.created + armed_ticks
 
-    # Get all bombs belonging to us
-    my_bombs = [
-        e
-        for e in game_state.entities
-        if e.entity_type == EntityType.BOMB and e.owner_unit_id in my_unit_ids
+    my_units_armed_bombs = [
+        e for e in game_state.entities if is_my_units_bomb(e) and is_bomb_armed(e)
     ]
 
-    for bomb in my_bombs:
-        # Check if bomb is armed long enough to be remotely detonated
-        if game_state.tick < bomb.created + armed_ticks:
-            continue
-
-        bx, by = bomb.x, bomb.y
-
-        # If enemy stands on the bomb tile itself, it will be hit
-        if enemy_unit.x == bx and enemy_unit.y == by:
-            return True, Point(bx, by)
-
-        # Determine blast diameter / radius
-        if bomb.blast_diameter is not None:
-            blast_diameter = bomb.blast_diameter
-        else:
-            # Fallback: use owning unit's blast_diameter or default to 3
-            blast_diameter = unit_blast_map.get(bomb.owner_unit_id, 3)
-
-        # Convert diameter (3,5,7,...) to radius (1,2,3,...)
+    for bomb in my_units_armed_bombs:
+        blast_diameter = bomb.blast_diameter or my_unit.blast_diameter or 3
         radius = max(0, (blast_diameter - 1) // 2)
 
-        # Check each of the 4 cardinal directions
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        # check in each direction, for up to `radius` tiles
+        directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        for dx, dy in directions:
             for step in range(1, radius + 1):
-                x = bx + dx * step
-                y = by + dy * step
+                maybe_enemy_position = Point(bomb.x + dx * step, bomb.y + dy * step)
 
-                if not in_bounds(x, y):
-                    break
+                if not is_in_bounds(maybe_enemy_position.x, maybe_enemy_position.y):
+                    continue
 
-                # If we see a solid block, blast stops here
-                entities_here = game_state.entities_at(x, y)
-                if any(
-                    e.entity_type
-                    in {
-                        EntityType.METAL_BLOCK,
-                        EntityType.ORE_BLOCK,
-                        EntityType.WOOD_BLOCK,
-                    }
-                    for e in entities_here
+                if bomb.position.distance_to(maybe_enemy_position) > radius:
+                    continue
+
+                if (
+                    maybe_enemy_position.x == enemy_unit.x
+                    and maybe_enemy_position.y == enemy_unit.y
                 ):
-                    # The block itself is hit, but blast does not go past it
-                    # (enemy can't stand on it anyway).
-                    break
+                    # check for obstacles between bomb and enemy
+                    is_blast_blocked = False
+                    for obstacle_step in range(1, step):
+                        ox = bomb.x + dx * obstacle_step
+                        oy = bomb.y + dy * obstacle_step
+                        entities_here = game_state.entities_at(ox, oy)
+                        if any(
+                            e.entity_type
+                            in {
+                                EntityType.METAL_BLOCK,
+                                EntityType.ORE_BLOCK,
+                                EntityType.WOOD_BLOCK,
+                            }
+                            for e in entities_here
+                        ):
+                            is_blast_blocked = True
+                            break
+                    if not is_blast_blocked:
+                        return True, bomb.position
 
-                # Check if enemy is on this tile
-                if enemy_unit.x == x and enemy_unit.y == y:
-                    return True, Point(bx, by)
-
-    return False, None
-
-
-def is_any_enemy_in_my_armed_blast_radius(
-    game_state: GameState,
-    armed_ticks: int = 5,
-) -> Tuple[Optional[UnitState], Optional[Point]]:
-    """
-    Return any enemy unit if it is in the blast radius of any bomb placed by
-    *our* agent and that bomb has been on the map for at least `armed_ticks`.
-    """
-    for enemy_unit in game_state.enemy_alive_units:
-        is_enemy_killable, bomb_position = is_enemy_in_my_armed_blast_radius(
-            game_state,
-            enemy_unit,
-            armed_ticks,
-        )
-        if is_enemy_killable:
-            return enemy_unit, bomb_position  # type: ignore
-    return None, None
+    return False, None  # Default return if no bomb hits
