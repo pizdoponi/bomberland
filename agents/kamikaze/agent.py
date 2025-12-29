@@ -7,6 +7,7 @@ import time
 from game_state import GameState as _GameState
 from types_ import *  # pyright: ignore[reportAssignmentType]  # noqa: F403
 from utils import (
+    get_enemy_targets_for_my_units,
     is_enemy_unit_in_my_units_armed_bomb_radius,
     shortest_path_to_enemy,
 )
@@ -98,11 +99,9 @@ class Agent:
             return
 
         # which enemy unit each of my units is targeting (round robin)
-        my_units_enemy_targets: dict[UnitState, UnitState] = {
-            my_unit: enemy_units[i % len(enemy_units)]
-            for i, my_unit in enumerate(my_units)
-        }
-
+        my_units_enemy_targets = get_enemy_targets_for_my_units(
+            game_state, my_units, enemy_units
+        )
         logger.info(
             f"On game tick {tick_number} my units are targeting: {',  '.join([my_unit.unit_id + '->' + my_units_enemy_targets[my_unit].unit_id for my_unit in my_units])}"
         )
