@@ -82,6 +82,10 @@ class Point:
         """Return coordinates in the JSON-compatible [x, y] format."""
         return [self.x, self.y]
 
+    def distance_to(self, other: Point) -> int:
+        """Compute Manhattan distance to another Point."""
+        return abs(self.x - other.x) + abs(self.y - other.y)
+
 
 # ─────────────────────────────────────────────────────────────
 # Core game objects
@@ -160,7 +164,9 @@ class UnitState:
 
         invulnerable_raw = data.get("invulnerable")
         if invulnerable_raw is None:
-            invulnerable_raw = data.get("invulnerability")  # used in some update payloads
+            invulnerable_raw = data.get(
+                "invulnerability"
+            )  # used in some update payloads
 
         unit_id_raw = data.get("unit_id")
         if unit_id_raw is None:
