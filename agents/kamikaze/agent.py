@@ -46,7 +46,9 @@ class Agent:
         ]
         loop.run_until_complete(asyncio.wait(tasks))
 
-    def retreat_and_detonate(self, unit: UnitState, armed_ticks: int = 5):
+    def retreat_and_detonate(
+        self, unit: UnitState, armed_ticks: int = 5, blast_duration: int = 5
+    ):
         retreat_moves: List[ActionPacket] = []
         current_point = unit.position
         for prev_point in list(reversed(self.units_move_history[unit]))[
@@ -72,6 +74,9 @@ class Agent:
                 target=unit.position,
             )
         )
+        # after detonation, wait for the blast to be over before pursuing the enemy again
+        for _ in range(blast_duration):
+            self.units_next_actions[unit].append(SkipAction(unit_id=unit.unit_id))
 
     async def _on_game_tick(self, tick_number, game_state):
         game_state = GameState.from_dict(game_state)
