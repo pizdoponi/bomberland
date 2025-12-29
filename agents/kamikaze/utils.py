@@ -115,10 +115,10 @@ def shortest_path_to_safe_square_after_bomb(
     return [Point(x, y) for (x, y) in path_coords]
 
 
-def shortest_path_to_enemy(
+def shortest_path(
     game_state: GameState,
-    my_unit: UnitState,
-    enemy_unit: UnitState,
+    start_point: Point,
+    end_point: Point,
 ) -> Optional[List[Point]]:
     """
     Compute the lowest-cost path from `my_unit` to `enemy_unit` using a
@@ -135,20 +135,14 @@ def shortest_path_to_enemy(
     Returns:
         A list of Points from start to goal (inclusive), or None if unreachable.
     """
-    start = my_unit.position
-    goal = enemy_unit.position
-
     # Early exit
-    if start.x == goal.x and start.y == goal.y:
-        return [start]
+    if start_point.x == end_point.x and start_point.y == end_point.y:
+        return [start_point]
 
     width, height = game_state.world.width, game_state.world.height
 
-    # Pre-compute blocked unit positions (all units except my_unit & enemy_unit)
     blocked_unit_positions = set()
     for u in game_state.all_units:
-        if u.unit_id in (my_unit.unit_id, enemy_unit.unit_id):
-            continue
         if u.is_alive():
             blocked_unit_positions.add((u.x, u.y))
 
@@ -163,7 +157,10 @@ def shortest_path_to_enemy(
             return None
 
         # Block other units (cannot walk through them)
-        if (x, y) in blocked_unit_positions and not (x == goal.x and y == goal.y):
+        if (x, y) in blocked_unit_positions and not (
+            (x == end_point.x and y == end_point.y)  # except for end point
+            or (x == start_point.x and y == start_point.y)  # and for start point
+        ):
             return None
 
         entities = game_state.entities_at(x, y)
@@ -190,11 +187,11 @@ def shortest_path_to_enemy(
         return base_cost
 
     # Dijkstra / weighted BFS
-    start_key = (start.x, start.y)
-    goal_key = (goal.x, goal.y)
+    start_key = (start_point.x, start_point.y)
+    goal_key = (end_point.x, end_point.y)
 
     # Priority queue entries: (total_cost_so_far, x, y)
-    pq: List[Tuple[int, int, int]] = [(0, start.x, start.y)]
+    pq: List[Tuple[int, int, int]] = [(0, start_point.x, start_point.y)]
     heapq.heapify(pq)
 
     # Distance and parent maps
@@ -263,7 +260,7 @@ def get_enemy_targets_for_my_units(
     ] = {}  # (my_unit, enemy_unit) -> path
     for my_unit in my_units:
         for enemy_unit in enemy_units:
-            path = shortest_path_to_enemy(game_state, my_unit, enemy_unit)
+            path = shortest_path(game_state, my_unit.position, enemy_unit.position)
             path_cache[(my_unit, enemy_unit)] = path
             if path is not None:
                 cost = len(path)

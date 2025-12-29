@@ -9,7 +9,7 @@ from types_ import *  # pyright: ignore[reportAssignmentType]  # noqa: F403
 from utils import (
     get_enemy_targets_for_my_units,
     is_enemy_unit_in_my_units_armed_bomb_radius,
-    shortest_path_to_enemy,
+    shortest_path,
 )
 
 # set up logging
@@ -156,10 +156,10 @@ class Agent:
                     logger.info(
                         f"Unit {unit.unit_id} at {unit.position} searching path to enemy {my_units_enemy_targets[unit].unit_id} at {my_units_enemy_targets[unit].position}."
                     )
-                    path = shortest_path_to_enemy(
+                    path = shortest_path(
                         game_state,
-                        unit,
-                        my_units_enemy_targets[unit],
+                        unit.position,
+                        my_units_enemy_targets[unit].position,
                     )
                     logger.info(f"Unit {unit.unit_id} found path to enemy: {path}")
 
