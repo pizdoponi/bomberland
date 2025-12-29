@@ -247,6 +247,60 @@ def shortest_path_to_enemy(
     return [Point(x, y) for (x, y) in path_coords]
 
 
+def get_enemy_targets_for_my_units(
+    game_state: GameState,
+    my_units: List[UnitState],
+    enemy_units: List[UnitState],
+) -> Dict[UnitState, UnitState]:
+    """
+    Assign each of `my_units` to an enemy in `enemy_units` such that the assignments
+    have the lowest total cost to reach the targets, where cost is defined as the length
+    of the shortest path from my unit to the enemy unit.
+    """
+    costs: List[Tuple[int, UnitState, UnitState]] = []  # (cost, my_unit, enemy_unit)
+    path_cache: Dict[
+        Tuple[UnitState, UnitState], Optional[List[Point]]
+    ] = {}  # (my_unit, enemy_unit) -> path
+    for my_unit in my_units:
+        for enemy_unit in enemy_units:
+            path = shortest_path_to_enemy(game_state, my_unit, enemy_unit)
+            path_cache[(my_unit, enemy_unit)] = path
+            if path is not None:
+                cost = len(path)
+                costs.append((cost, my_unit, enemy_unit))
+    # Sort costs ascending
+    costs.sort(key=lambda x: x[0])
+    # keep track of assigned units
+    assigned_my_units: Set[UnitState] = set()
+    assigned_enemy_units: Set[UnitState] = set()
+    assignments: Dict[UnitState, UnitState] = {}
+
+    for cost, my_unit, enemy_unit in costs:
+        if my_unit in assigned_my_units or enemy_unit in assigned_enemy_units:
+            continue
+        assignments[my_unit] = enemy_unit
+        assigned_my_units.add(my_unit)
+        assigned_enemy_units.add(enemy_unit)
+
+    # if some of my_units are unassigned, assign them randomly to the closest enemy
+    unassigned_my_units = [u for u in my_units if u not in assigned_my_units]
+
+    for my_unit in unassigned_my_units:
+        closest_enemy = None
+        closest_cost = float("inf")
+        for enemy_unit in enemy_units:
+            path = path_cache.get((my_unit, enemy_unit))
+            if path is not None:
+                cost = len(path)
+                if cost < closest_cost:
+                    closest_cost = cost
+                    closest_enemy = enemy_unit
+        if closest_enemy is not None:
+            assignments[my_unit] = closest_enemy
+
+    return assignments
+
+
 def is_enemy_unit_in_my_units_armed_bomb_radius(
     game_state: GameState,
     my_unit: UnitState,
@@ -265,9 +319,6 @@ def is_enemy_unit_in_my_units_armed_bomb_radius(
 
     def is_my_units_bomb(bomb: Entity) -> bool:
         """Return True if bomb belongs to `my_unit`."""
-        assert bomb.entity_type == EntityType.BOMB, (
-            "is_my_units_bomb called on non-bomb entity."
-        )
         return (
             bomb.entity_type == EntityType.BOMB
             and bomb.owner_unit_id == my_unit.unit_id
