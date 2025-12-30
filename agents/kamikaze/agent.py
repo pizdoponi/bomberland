@@ -81,7 +81,7 @@ class Agent:
                 )
                 return
 
-            retreat_path = retreat_path[: (unit.blast_diameter // 2) + 1]
+            retreat_path = retreat_path[1 : (unit.blast_diameter // 2) + 2]
             logger.info(
                 f"Unit {unit.unit_id} found alternative retreat path to {retreat_path[-1]}: {retreat_path}"
             )
