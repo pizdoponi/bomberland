@@ -342,6 +342,31 @@ class Entity:
             EntityType.BLAST,  # includes end-game fire
         }
 
+    def blast_diameter_(self, unit: Optional[UnitState] = None) -> int:
+        """Return the blast diameter if this entity is a bomb.
+
+        If the entity is not a bomb, returns 0. If a UnitState is provided
+        and it matches the owner of the bomb, returns that unit's blast
+        diameter (to account for powerups).
+        """
+        if self.entity_type != EntityType.BOMB:
+            return 0
+        if unit is not None and self.owner_unit_id == unit.unit_id:
+            return unit.blast_diameter
+        if self.blast_diameter is not None:
+            return self.blast_diameter  # type: ignore
+        return 3  # default bomb blast diameter
+
+    def blast_radius(self, unit: Optional[UnitState] = None) -> int:
+        """Return the blast radius if this entity is a bomb.
+
+        If the entity is not a bomb, returns 0. If a UnitState is provided
+        and it matches the owner of the bomb, returns that unit's blast
+        radius (to account for powerups).
+        """
+        diameter = self.blast_diameter_(unit)
+        return max(0, diameter // 2)
+
 
 @dataclass
 class World:

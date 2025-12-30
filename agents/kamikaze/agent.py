@@ -8,6 +8,7 @@ from game_state import GameState as _GameState
 from types_ import *  # pyright: ignore[reportAssignmentType]  # noqa: F403
 from utils import (
     get_enemy_targets_for_my_units,
+    get_retreat_path_after_bomb_placement,
     is_enemy_unit_in_my_units_armed_bomb_radius,
     shortest_path,
 )
@@ -48,19 +49,57 @@ class Agent:
         loop.run_until_complete(asyncio.wait(tasks))
 
     def retreat_and_detonate(
-        self, unit: UnitState, armed_ticks: int = 5, blast_duration: int = 5
+        self,
+        game_state: GameState,
+        unit: UnitState,
+        armed_ticks: int = 5,
+        blast_duration: int = 5,
     ):
+        retreat_path = list(reversed(self.units_move_history[unit]))
+
+        if len(retreat_path) < (unit.blast_diameter // 2) + 1:
+            logger.warning(
+                f"Unit {unit.unit_id} does not have enough movement history to retreat safely after placing a bomb at {unit.position}. Current history length: {len(retreat_path)}, required: {(unit.blast_diameter // 2) + 1}. Finding alternative retreat path."
+            )
+            retreat_path = get_retreat_path_after_bomb_placement(game_state, unit)
+
+            if retreat_path is None or (
+                len(retreat_path) < (unit.blast_diameter // 2) + 1
+            ):
+                logger.error(
+                    f"Unit {unit.unit_id} could not find a retreat path after placing a bomb at {unit.position}, or the retreat path is to short. Staying in place and detonating bomb."
+                )
+                for _ in range(armed_ticks):
+                    self.units_next_actions[unit].append(
+                        SkipAction(unit_id=unit.unit_id)
+                    )
+                self.units_next_actions[unit].append(
+                    DetonateAction(
+                        unit_id=unit.unit_id,
+                        target=unit.position,
+                    )
+                )
+                return
+
+            retreat_path = retreat_path[: (unit.blast_diameter // 2) + 1]
+            logger.info(
+                f"Unit {unit.unit_id} found alternative retreat path to {retreat_path[-1]}: {retreat_path}"
+            )
+        else:
+            retreat_path = retreat_path[: (unit.blast_diameter // 2) + 1]
+            logger.info(
+                f"Unit {unit.unit_id} retreating along movement history to {retreat_path[-1]}: {retreat_path}"
+            )
+
         retreat_moves: List[ActionPacket] = []
         current_point = unit.position
-        for prev_point in list(reversed(self.units_move_history[unit]))[
-            :3
-        ]:  # retreat three steps, if possible
+        for next_point in retreat_path:
             retreat_move = MoveAction.from_points(
-                unit.unit_id, current_point, prev_point
+                unit.unit_id, current_point, next_point
             )
             if retreat_move is not None:
                 retreat_moves.append(retreat_move)
-                current_point = prev_point
+                current_point = next_point
 
         # set the premoves for this unit
         # first the retreat moves, to not be blown by own bomb
@@ -171,7 +210,7 @@ class Agent:
                         # place bomb
                         await self._client.send_bomb(unit_id)
                         # retreat and detonate
-                        self.retreat_and_detonate(unit)
+                        self.retreat_and_detonate(game_state, unit)
 
                     # if the next step is safe, and able to move there (not blocked), move there
                     elif path is not None and len(path) > 1:
@@ -194,7 +233,7 @@ class Agent:
                                 f"Unit {unit.unit_id} cannot move to {next_point} from {unit.position} as it is not walkable. Placing bomb at {unit.position} and retreating."
                             )
                             await self._client.send_bomb(unit_id)
-                            self.retreat_and_detonate(unit)
+                            self.retreat_and_detonate(game_state, unit)
 
                     else:
                         # no path to enemy found, do nothing this tick; should not happen

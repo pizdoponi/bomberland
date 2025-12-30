@@ -262,3 +262,40 @@ def is_enemy_unit_in_my_units_armed_bomb_radius(
                         return True, bomb.position
 
     return False, None  # Default return if no bomb hits
+
+
+def get_retreat_path_after_bomb_placement(
+    game_state: GameState, unit: UnitState
+) -> Optional[List[Point]]:
+    """
+    Find a safe path away from the bomb position after placing a bomb, to avoid
+    being caught in the blast radius.
+
+    Returns:
+        A list of Points representing the evacuation path, or None if no safe path exists.
+    """
+
+    blast_diameter = unit.blast_diameter or 3
+    radius = max(0, (blast_diameter - 1) // 2)
+
+    width, height = game_state.world.width, game_state.world.height
+
+    # Identify all safe tiles immediately outside blast radius
+    safe_tiles: List[Point] = []
+    for x in range(width):
+        for y in range(height):
+            distance = abs(x - unit.x) + abs(y - unit.y)
+            if distance == radius + 1:
+                safe_tiles.append(Point(x, y))
+
+    # Find shortest path to any safe tile
+    shortest_evacuation_path: Optional[List[Point]] = None
+    for safe_tile in safe_tiles:
+        path = shortest_path(game_state, unit.position, safe_tile)
+        if path is not None:
+            if shortest_evacuation_path is None or len(path) < len(
+                shortest_evacuation_path
+            ):
+                shortest_evacuation_path = path
+
+    return shortest_evacuation_path
