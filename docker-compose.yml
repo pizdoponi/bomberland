@@ -11,11 +11,11 @@ services:
             - AGENT_ID_MAPPING=agentA,agentB
             - INITIAL_HP=3
             - PRNG_SEED=1234
-            - SHUTDOWN_ON_GAME_END_ENABLED=1
+            - SHUTDOWN_ON_GAME_END_ENABLED=0
             - TELEMETRY_ENABLED=1
             - TICK_RATE_HZ=10
             - TRAINING_MODE_ENABLED=0
-            - WORLD_SEED=1234
+            - WORLD_SEED=9999
         deploy:
             resources:
                 limits:
@@ -24,32 +24,31 @@ services:
         networks:
             - coderone-tournament
 
-    # Uncomment the following "agent-a" blocks to connect a second agent to the environment
-
-    # agent-a:
-    #     extends:
-    #         file: base-compose.yml
-    #         # update next line with a service in base-compose.yml to change agent
-    #         service: python3-agent-dev
-    #     environment:
-    #         - GAME_CONNECTION_STRING=ws://game-engine:3000/?role=agent&agentId=agentA&name=python3-agent-dev
-    #     depends_on:
-    #         - game-engine
-    #     deploy:
-    #         resources:
-    #             limits:
-    #                 cpus: "1"
-    #                 memory: "1024M"
-    #     networks:
-    #         - coderone-tournament
+    # comment to play as agent, uncomment to let agent play
+    agent-a:
+        extends:
+            file: base-compose.yml
+            # update next line with a service in base-compose.yml to change agent
+            service: kamikaze
+        environment:
+            - GAME_CONNECTION_STRING=ws://game-engine:3000/?role=agent&agentId=agentA&name=kamikaze
+        depends_on:
+            - game-engine
+        deploy:
+            resources:
+                limits:
+                    cpus: "1"
+                    memory: "1024M"
+        networks:
+            - coderone-tournament
 
     agent-b:
         extends:
             file: base-compose.yml
             # update next line with a service in base-compose.yml to change agent
-            service: python3-agent-dev
+            service: bombwalker
         environment:
-            - GAME_CONNECTION_STRING=ws://game-engine:3000/?role=agent&agentId=agentB&name=python3-agent
+            - GAME_CONNECTION_STRING=ws://game-engine:3000/?role=agent&agentId=agentB&name=bombwalker
         depends_on:
             - game-engine
         deploy:

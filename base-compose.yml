@@ -7,7 +7,7 @@ services:
               source: ./agents/replay.json
               target: /app/replay.json
 
-    bombwalker-agent:
+    bombwalker:
         build:
             context: agents/bombwalker
             dockerfile: Dockerfile.dev
