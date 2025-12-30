@@ -224,7 +224,14 @@ class Agent:
                                 logger.info(
                                     f"Unit {unit.unit_id} at {unit.position} moving towards enemy {my_units_enemy_targets[unit].unit_id} at {my_units_enemy_targets[unit].position} by going to {next_point}."
                                 )
-                                self.units_move_history[unit].append(unit.position)
+                                # only append the move if it is different from the last position
+                                # may happen if two units try to move to the same position, and block each other
+                                if (
+                                    len(self.units_move_history[unit]) == 0
+                                    or self.units_move_history[unit][-1] != next_point
+                                ):
+                                    self.units_move_history[unit].append(unit.position)
+
                                 await self._client._send(next_move.to_dict())
 
                         else:
