@@ -8,12 +8,11 @@ from typing import Deque, Dict, List, Tuple
 
 import numpy as np
 import torch
+from dqn_config import DQNConfig
 from dqn_model import DQNModel, ReplayBuffer
 from game_state import GameState
 from types_ import AgentId, EntityType
 from types_ import GameState as TypedGameState
-
-from agents.dqn.dqn_config import DQNConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,38 +39,21 @@ class DQNAgent:
 
         self._actions = ["up", "down", "left", "right", "bomb", "detonate", "wait"]
 
-        self._config = DQNConfig.from_env()
-        self._training_enabled = self._config.training_enabled
-        self._epsilon = self._config.epsilon_start
-        self._epsilon_min = self._config.epsilon_min
-        self._epsilon_decay = self._config.epsilon_decay
-
-        self._gamma = self._config.gamma
-        self._batch_size = self._config.batch_size
-        self._replay_capacity = self._config.replay_capacity
-        self._learning_rate = self._config.learning_rate
-        self._hidden_dim = self._config.hidden_dim
-        self._target_update_interval = self._config.target_update_interval
-        self._save_interval = self._config.save_interval
-        self._checkpoint_path = self._config.checkpoint_path
-        self._load_path = self._config.load_path
-
-        self._frame_stack_size = self._config.frame_stack_size
-
-        self._max_hp = self._config.max_hp
-        self._max_bombs = self._config.max_bombs
-        self._max_ore_hp = self._config.max_ore_hp
+        self.config = DQNConfig.from_env()
+        self.config.epsilon_start = self.config.epsilon_start
 
         self._channels = 8
         self._num_heads = 3
-        self._device = torch.device(self._config.device)
+        self._device = torch.device(self.config.device)
 
         self._model = None
         self._target_model = None
         self._optimizer = None
-        self._replay_buffer = ReplayBuffer(self._replay_capacity)
+        self._replay_buffer = ReplayBuffer(self.config.replay_capacity)
 
-        self._frame_stack: Deque[np.ndarray] = deque(maxlen=self._frame_stack_size)
+        self._frame_stack: Deque[np.ndarray] = deque(
+            maxlen=self.config.frame_stack_size
+        )
         self._last_state: Dict[str, np.ndarray] = {}
         self._last_action: Dict[str, int] = {}
         self._last_metrics: Dict[str, Dict[str, float]] = {}
@@ -93,28 +75,30 @@ class DQNAgent:
         enemy_units = typed_state.enemy_units
 
         if self._model is None:
-            input_channels = self._channels * self._frame_stack_size
+            in_channels = self._channels * self.config.frame_stack_size
             self._model = DQNModel(
-                in_channels=input_channels,
+                in_channels=in_channels,
                 height=typed_state.world.height,
                 width=typed_state.world.width,
                 num_heads=self._num_heads,
                 num_actions=len(self._actions),
-                hidden_dim=self._hidden_dim,
+                hidden_dim=self.config.hidden_dim,
             ).to(self._device)
             self._target_model = DQNModel(
-                in_channels=input_channels,
+                in_channels=in_channels,
                 height=typed_state.world.height,
                 width=typed_state.world.width,
                 num_heads=self._num_heads,
                 num_actions=len(self._actions),
-                hidden_dim=self._hidden_dim,
+                hidden_dim=self.config.hidden_dim,
             ).to(self._device)
-            self._optimizer = torch.optim.adamw.AdamW(self._model.parameters(), lr=self._learning_rate)
-            if os.path.exists(self._load_path):
-                self._model.load(self._load_path)
+            self._optimizer = torch.optim.adamw.AdamW(
+                self._model.parameters(), lr=self.config.learning_rate
+            )
+            if os.path.exists(self.config.load_path):
+                self._model.load(self.config.load_path)
                 self._target_model.load_state_dict(self._model.state_dict())
-                logger.info("Loaded checkpoint from %s", self._load_path)
+                logger.info("Loaded checkpoint from %s", self.config.load_path)
 
         frame = self._encode_frame(typed_state, my_agent_id)
         stacked_state = self._update_frame_stack(frame)
@@ -191,21 +175,24 @@ class DQNAgent:
             self._last_action[unit_id] = action_index
             self._last_metrics[unit_id] = metrics
 
-        if self._training_enabled:
+        if self.config.training_enabled:
             self._train_step()
-            if self._step_count % self._target_update_interval == 0:
+            if self._step_count % self.config.target_update_interval == 0:
                 self._target_model.load_state_dict(self._model.state_dict())
-            if self._step_count % self._save_interval == 0:
-                self._model.save(self._checkpoint_path)
+            if self._step_count % self.config.save_interval == 0:
+                self._model.save(self.config.checkpoint_path)
 
-            if self._epsilon > self._epsilon_min:
-                self._epsilon = max(self._epsilon_min, self._epsilon * self._epsilon_decay)
+        if self.config.epsilon_start > self.config.epsilon_min:
+            self.config.epsilon_start = max(
+                self.config.epsilon_min,
+                self.config.epsilon_start * self.config.epsilon_decay,
+            )
 
     def _train_step(self) -> None:
-        if len(self._replay_buffer) < self._batch_size:
+        if len(self._replay_buffer) < self.config.batch_size:
             return
-        states, head_indices, actions, rewards, next_states, dones = self._replay_buffer.sample(
-            self._batch_size
+        states, head_indices, actions, rewards, next_states, dones = (
+            self._replay_buffer.sample(self.config.batch_size)
         )
         states_t = torch.from_numpy(states).float().to(self._device)
         next_states_t = torch.from_numpy(next_states).float().to(self._device)
@@ -215,13 +202,15 @@ class DQNAgent:
         dones_t = torch.from_numpy(dones).float().to(self._device)
 
         q_values = self._model(states_t)
-        q_selected = q_values[torch.arange(self._batch_size), head_idx_t, actions_t]
+        q_selected = q_values[
+            torch.arange(self.config.batch_size), head_idx_t, actions_t
+        ]
 
         with torch.no_grad():
             q_next = self._target_model(next_states_t)
             max_q_next = torch.max(q_next, dim=2).values
-            max_q = max_q_next[torch.arange(self._batch_size), head_idx_t]
-            targets = rewards_t + (1.0 - dones_t) * self._gamma * max_q
+            max_q = max_q_next[torch.arange(self.config.batch_size), head_idx_t]
+            targets = rewards_t + (1.0 - dones_t) * self.config.gamma * max_q
 
         loss = torch.mean((q_selected - targets) ** 2)
         self._optimizer.zero_grad()
@@ -231,13 +220,16 @@ class DQNAgent:
 
         if self._step_count % 100 == 0:
             logger.info(
-                "Training step %s, loss %.4f, epsilon %.3f", self._step_count, loss.item(), self._epsilon
+                "Training step %s, loss %.4f, epsilon %.3f",
+                self._step_count,
+                loss.item(),
+                self.config.epsilon_start,
             )
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
         if not legal_actions:
             return self._actions.index("wait")
-        if self._training_enabled and random.random() < self._epsilon:
+        if self.config.training_enabled and random.random() < self.config.epsilon_start:
             return random.choice(legal_actions)
         return max(legal_actions, key=lambda idx: q_values[idx])
 
@@ -269,7 +261,7 @@ class DQNAgent:
 
     def _update_frame_stack(self, frame: np.ndarray) -> np.ndarray:
         if len(self._frame_stack) == 0:
-            for _ in range(self._frame_stack_size):
+            for _ in range(self.config.frame_stack_size):
                 self._frame_stack.append(frame)
         else:
             self._frame_stack.append(frame)
@@ -286,8 +278,8 @@ class DQNAgent:
             if entity.entity_type == EntityType.METAL_BLOCK:
                 frame[0, y, x] = 1.0
             elif entity.entity_type == EntityType.ORE_BLOCK:
-                hp = float(entity.hp or self._max_ore_hp)
-                frame[1, y, x] = min(hp / self._max_ore_hp, 1.0)
+                hp = float(entity.hp or self.config.max_ore_hp)
+                frame[1, y, x] = min(hp / self.config.max_ore_hp, 1.0)
             elif entity.entity_type == EntityType.WOOD_BLOCK:
                 frame[2, y, x] = 1.0
             elif entity.entity_type == EntityType.BOMB:
