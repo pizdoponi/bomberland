@@ -6,7 +6,6 @@ import os
 
 @dataclass
 class DQNConfig:
-    training_enabled: bool = True
     epsilon_start: float = 1.0
     epsilon_min: float = 0.1
     epsilon_decay: float = 0.995
@@ -27,17 +26,10 @@ class DQNConfig:
 
     @classmethod
     def from_env(cls) -> "DQNConfig":
-        def get_bool(key: str, default: bool) -> bool:
-            raw = os.environ.get(key)
-            if raw is None:
-                return default
-            return raw == "1" or raw.lower() in {"true", "yes"}
-
         checkpoint_path = os.environ.get("DQN_CHECKPOINT_PATH", cls.checkpoint_path)
         load_path = os.environ.get("DQN_LOAD_PATH", checkpoint_path)
 
         return cls(
-            training_enabled=get_bool("DQN_TRAINING", cls.training_enabled),
             epsilon_start=float(os.environ.get("DQN_EPSILON_START", cls.epsilon_start)),
             epsilon_min=float(os.environ.get("DQN_EPSILON_MIN", cls.epsilon_min)),
             epsilon_decay=float(os.environ.get("DQN_EPSILON_DECAY", cls.epsilon_decay)),

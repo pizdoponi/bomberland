@@ -16,7 +16,7 @@ CNN input uses a global board tensor with frame stacking. The network shares a C
 
 Configuration lives in `DQNConfig` (`agents/dqn/config.py`). Environment variables are optional overrides:
 
-- `DQN_EPSILON_START` (default: `1.0`)
+- `DQN_EPSILON_START` (default: `1.0`) used by `train.py` only
 - `DQN_EPSILON_MIN` (default: `0.1`)
 - `DQN_EPSILON_DECAY` (default: `0.995`)
 - `DQN_GAMMA` (default: `0.99`)
