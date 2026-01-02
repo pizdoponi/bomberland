@@ -2,13 +2,12 @@ import argparse
 import asyncio
 import datetime as dt
 import json
-import os
 import random
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import dotenv
 from tqdm import tqdm
@@ -24,7 +23,7 @@ REPLAY_PATH = ROOT_DIR / "agents" / "replay.json"
 
 
 def run_command(
-    command: list[str],
+    command: List[str],
     check: bool = True,
     capture_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
@@ -51,7 +50,11 @@ def parse_base_compose() -> Dict[str, Dict[str, Optional[str]]]:
             continue
         if not in_services:
             continue
-        if line.startswith("    ") and stripped.endswith(":") and ":" not in stripped[:-1]:
+        if (
+            line.startswith("    ")
+            and stripped.endswith(":")
+            and ":" not in stripped[:-1]
+        ):
             service_name = stripped[:-1]
             current_service = service_name
             services[current_service] = {"context": None}
@@ -204,6 +207,19 @@ def save_logs(compose_path: Path, since_ts: str, output_path: Path) -> None:
     output_path.write_text(result.stdout or "")
 
 
+def resolve_winner_name(
+    endgame_payload: Dict[str, Any], agent_a: str, agent_b: str
+) -> str:
+    winner_id = endgame_payload.get("winning_agent_id")
+    if winner_id is None:
+        return "draw"
+    if winner_id == "agentA":
+        return agent_a
+    if winner_id == "agentB":
+        return agent_b
+    return str(winner_id)
+
+
 async def run_arena(agent_a: str, agent_b: str, num_runs: int) -> None:
     services = parse_base_compose()
     agent_a_service = resolve_agent_service(agent_a, services)
@@ -236,7 +252,7 @@ async def run_arena(agent_a: str, agent_b: str, num_runs: int) -> None:
 
     try:
         ws = await connect_admin(DEFAULT_ADMIN_WS)
-    except Exception as exc:
+    except Exception:
         print(
             "Warning: failed to connect as admin. Ensure ADMIN_ROLE_ENABLED=1 and the engine is reachable.",
             file=sys.stderr,
@@ -250,14 +266,14 @@ async def run_arena(agent_a: str, agent_b: str, num_runs: int) -> None:
             world_seed = random.randint(1, 1_000_000)
             prng_seed = world_seed
             previous_mtime = REPLAY_PATH.stat().st_mtime if REPLAY_PATH.exists() else 0
-            since_ts = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+            since_ts = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
             reset_packet = {
                 "type": "request_game_reset",
                 "world_seed": world_seed,
                 "prng_seed": prng_seed,
             }
             await ws.send(json.dumps(reset_packet))
-            await wait_for_endgame(ws, timeout_s=600)
+            endgame_payload = await wait_for_endgame(ws, timeout_s=600)
 
             replay_ready = wait_for_replay_update(previous_mtime)
             run_dir = REPLAYS_DIR / f"{agent_a}_{agent_b}_{world_seed}"
@@ -271,6 +287,8 @@ async def run_arena(agent_a: str, agent_b: str, num_runs: int) -> None:
                     file=sys.stderr,
                 )
             save_logs(compose_path, since_ts, run_dir / "logs.log")
+            winner_name = resolve_winner_name(endgame_payload, agent_a, agent_b)
+            (run_dir / "winner").write_text(f"{winner_name}\n")
     finally:
         await ws.close()
 
@@ -279,9 +297,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run repeated Bomberland arena matches between two agents."
     )
-    parser.add_argument("agent_a", help="Agent A name (base-compose.yml service or agents/ folder)")
-    parser.add_argument("agent_b", help="Agent B name (base-compose.yml service or agents/ folder)")
-    parser.add_argument("--num-runs", type=int, default=1, help="Number of runs to simulate")
+    parser.add_argument(
+        "agent_a", help="Agent A name (base-compose.yml service or agents/ folder)"
+    )
+    parser.add_argument(
+        "agent_b", help="Agent B name (base-compose.yml service or agents/ folder)"
+    )
+    parser.add_argument(
+        "--num-runs", type=int, default=1, help="Number of runs to simulate"
+    )
     args = parser.parse_args()
 
     if args.num_runs < 1:
