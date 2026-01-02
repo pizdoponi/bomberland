@@ -1,6 +1,8 @@
 # Overview
 
-`agent.py` - CNN-based DQN agent (PyTorch) with frame stacking, multi-head outputs, and checkpointing
+`agent.py` - CNN-based DQN agent (PyTorch) for inference (loads a checkpoint and runs the policy)
+
+`train.py` - training loop for the CNN DQN agent (replay buffer, target network, checkpointing)
 
 `agent_fwd.py` - random agent that connects to forward model
 
@@ -8,13 +10,12 @@
 
 ## DQN Usage
 
-The agent trains online by default and saves a checkpoint periodically.
+Training runs online and saves a checkpoint periodically. `agent.py` only runs inference.
 
 CNN input uses a global board tensor with frame stacking. The network shares a CNN trunk and has three action heads, one per unit (sorted by unit ID).
 
 Configuration lives in `DQNConfig` (`agents/dqn/config.py`). Environment variables are optional overrides:
 
-- `DQN_TRAINING` (default: `1`) set to `0` to disable training
 - `DQN_EPSILON_START` (default: `1.0`)
 - `DQN_EPSILON_MIN` (default: `0.1`)
 - `DQN_EPSILON_DECAY` (default: `0.995`)
