@@ -83,7 +83,7 @@ class DQNTrainer:
                 num_heads=self._feature_builder.num_heads,
                 num_actions=NUM_ACTIONS,
                 fc_hidden_dim=self.config.hidden_dim,
-            ).to(self._device)
+            ).to(self.config.device)
             self._target_model = DQNModel(
                 conv_in_channels=in_channels,
                 conv_hidden_channels=self.config.conv_hidden_channels,
@@ -93,7 +93,7 @@ class DQNTrainer:
                 num_heads=self._feature_builder.num_heads,
                 num_actions=NUM_ACTIONS,
                 fc_hidden_dim=self.config.hidden_dim,
-            ).to(self._device)
+            ).to(self.config.device)
             self._optimizer = torch.optim.adamw.AdamW(
                 self._model.parameters(), lr=self.config.learning_rate
             )
@@ -139,7 +139,7 @@ class DQNTrainer:
                 self._last_metrics.pop(unit_id, None)
 
         state_tensor = (
-            torch.from_numpy(stacked_state).float().unsqueeze(0).to(self._device)
+            torch.from_numpy(stacked_state).float().unsqueeze(0).to(self.config.device)
         )
         with torch.no_grad():
             q_values = self._model(state_tensor)[0].cpu().numpy()
@@ -206,12 +206,12 @@ class DQNTrainer:
         states, head_indices, actions, rewards, next_states, dones = (
             self._replay_buffer.sample(self.config.batch_size)
         )
-        states_t = torch.from_numpy(states).float().to(self._device)
-        next_states_t = torch.from_numpy(next_states).float().to(self._device)
-        head_idx_t = torch.from_numpy(head_indices).long().to(self._device)
-        actions_t = torch.from_numpy(actions).long().to(self._device)
-        rewards_t = torch.from_numpy(rewards).float().to(self._device)
-        dones_t = torch.from_numpy(dones).float().to(self._device)
+        states_t = torch.from_numpy(states).float().to(self.config.device)
+        next_states_t = torch.from_numpy(next_states).float().to(self.config.device)
+        head_idx_t = torch.from_numpy(head_indices).long().to(self.config.device)
+        actions_t = torch.from_numpy(actions).long().to(self.config.device)
+        rewards_t = torch.from_numpy(rewards).float().to(self.config.device)
+        dones_t = torch.from_numpy(dones).float().to(self.config.device)
 
         q_values = self._model(states_t)
         q_selected = q_values[
