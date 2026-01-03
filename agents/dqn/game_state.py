@@ -1,5 +1,5 @@
 import asyncio
-from typing import Union
+from typing import Optional, Union
 import websockets
 import json
 
@@ -13,9 +13,13 @@ class GameState:
         self._connection_string = connection_string
         self._state = None
         self._tick_callback = None
+        self._endgame_callback = None
 
     def set_game_tick_callback(self, generate_agent_action_callback):
         self._tick_callback = generate_agent_action_callback
+
+    def set_endgame_callback(self, endgame_callback):
+        self._endgame_callback = endgame_callback
 
     async def connect(self):
         self.connection = await websockets.connect(self._connection_string)
@@ -37,6 +41,20 @@ class GameState:
     async def send_detonate(self, x, y, unit_id: str):
         packet = {"type": "detonate", "coordinates": [
             x, y], "unit_id": unit_id}
+        await self._send(packet)
+
+    async def send_request_tick(self):
+        packet = {"type": "request_tick"}
+        await self._send(packet)
+
+    async def send_request_game_reset(
+        self, world_seed: Optional[int] = None, prng_seed: Optional[int] = None
+    ):
+        packet = {"type": "request_game_reset"}
+        if world_seed is not None:
+            packet["world_seed"] = world_seed
+        if prng_seed is not None:
+            packet["prng_seed"] = prng_seed
         await self._send(packet)
 
     async def _handle_messages(self, connection: WebSocketClientProtocol):
@@ -65,6 +83,10 @@ class GameState:
             payload = data.get("payload")
             winning_agent_id = payload.get("winning_agent_id")
             print(f"Game over. Winner: Agent {winning_agent_id}")
+            if self._endgame_callback is not None:
+                result = self._endgame_callback(payload)
+                if asyncio.iscoroutine(result):
+                    await result
         else:
             print(f"unknown packet \"{data_type}\": {data}")
 

@@ -12,6 +12,7 @@ from dqn_model import NUM_ACTIONS, ActionType, DQNModel, ReplayBuffer
 from dqn_shared import DQNFeatureBuilder, action_to_move
 from game_state import GameState
 from types_ import GameState as TypedGameState
+from types_ import Role
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 uri = (
     os.environ.get("GAME_CONNECTION_STRING")
-    or "ws://127.0.0.1:3000/?role=admin&agentId=agentId&name=dqn"
+    or "ws://127.0.0.1:3000/?role=admin&agentId=agentA&name=dqn"
 )
 
 
@@ -29,6 +30,8 @@ class DQNTrainer:
     def __init__(self) -> None:
         self._client = GameState(uri)
         self._client.set_game_tick_callback(self._on_game_tick)
+        self._client.set_endgame_callback(self._on_endgame)
+        self._is_admin_connection = "role=admin" in uri.lower()
 
         self.config = DQNConfig.from_env()
 
@@ -48,6 +51,8 @@ class DQNTrainer:
 
         loop = asyncio.get_event_loop()
         connection = loop.run_until_complete(self._client.connect())
+        if self._is_admin_connection:
+            loop.run_until_complete(self._client.send_request_tick())
         tasks = [asyncio.ensure_future(self._client._handle_messages(connection))]  # pyright: ignore[reportArgumentType]
         loop.run_until_complete(asyncio.wait(tasks))
 
@@ -187,6 +192,9 @@ class DQNTrainer:
                 self.config.epsilon_min, self._epsilon * self.config.epsilon_decay
             )
 
+        if typed_state.connection.role == Role.ADMIN:
+            await self._client.send_request_tick()
+
     def _train_step(self) -> None:
         if len(self._replay_buffer) < self.config.batch_size:
             return
@@ -249,6 +257,20 @@ class DQNTrainer:
             return
         else:
             logger.warning("Unhandled action %s for unit %s", action_type, unit_id)
+
+    async def _on_endgame(self, payload: Dict) -> None:
+        if not self._is_admin_connection:
+            return
+        self._feature_builder.reset_stack()
+        self._last_state.clear()
+        self._last_action.clear()
+        self._last_metrics.clear()
+        world_seed = random.randint(0, 2**31 - 1)
+        prng_seed = random.randint(0, 2**31 - 1)
+        await self._client.send_request_game_reset(
+            world_seed=world_seed, prng_seed=prng_seed
+        )
+        await self._client.send_request_tick()
 
 
 def main() -> None:
