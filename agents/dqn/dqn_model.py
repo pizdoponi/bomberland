@@ -208,7 +208,7 @@ class DQNModel(nn.Module):
         num_actions: int = NUM_ACTIONS,
     ) -> None:
         super().__init__()
-        # 7 convolutional layers, so that each tile can "see" the entire map
+        # > 7 convolutional layers, so that each tile can "see" the entire map
         self.stem = nn.Sequential(
             ResNetBlock(conv_in_channels, conv_hidden_channels),
             ResNetBlock(conv_hidden_channels, conv_hidden_channels),
@@ -241,3 +241,9 @@ class DQNModel(nn.Module):
 
     def load(self, path: str) -> None:
         self.load_state_dict(torch.load(path, map_location="cpu"))
+
+    @staticmethod
+    def from_checkpoint(path: str, **kwargs) -> "DQNModel":
+        model = DQNModel(**kwargs)
+        model.load(path)
+        return model
