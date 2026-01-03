@@ -25,9 +25,26 @@ class ActionType(Enum):
     DOWN = 1
     LEFT = 2
     RIGHT = 3
-    PLACE_BOMB = 5
-    DETONATE_BOMB = 6
-    SKIP = 7
+    PLACE_BOMB = 4
+    DETONATE_BOMB = 5
+    WAIT = 6
+    SKIP = 6
+
+    @classmethod
+    def ordered(cls) -> list["ActionType"]:
+        return [
+            cls.UP,
+            cls.DOWN,
+            cls.LEFT,
+            cls.RIGHT,
+            cls.PLACE_BOMB,
+            cls.DETONATE_BOMB,
+            cls.WAIT,
+        ]
+
+    @classmethod
+    def from_index(cls, index: int) -> "ActionType":
+        return cls(index)
 
     def to_action_packet(
         self, unit_id: str, bomb_position: Optional[Point] = None
@@ -38,22 +55,22 @@ class ActionType(Enum):
             )
 
         mapping = {
-            ActionType.UP: MoveAction.from_direction(unit_id=unit_id, direction="UP"),
+            ActionType.UP: MoveAction.from_direction(unit_id=unit_id, direction="up"),
             ActionType.DOWN: MoveAction.from_direction(
-                unit_id=unit_id, direction="DOWN"
+                unit_id=unit_id, direction="down"
             ),
             ActionType.LEFT: MoveAction.from_direction(
-                unit_id=unit_id, direction="LEFT"
+                unit_id=unit_id, direction="left"
             ),
             ActionType.RIGHT: MoveAction.from_direction(
-                unit_id=unit_id, direction="RIGHT"
+                unit_id=unit_id, direction="right"
             ),
             ActionType.PLACE_BOMB: BombAction(unit_id=unit_id),
             ActionType.DETONATE_BOMB: DetonateAction(
                 unit_id=unit_id,
                 target=bomb_position,  # pyright: ignore[reportArgumentType]
             ),
-            ActionType.SKIP: SkipAction(unit_id=unit_id),
+            ActionType.WAIT: SkipAction(unit_id=unit_id),
         }
         return mapping[self]
 
@@ -105,7 +122,7 @@ class ReplayBuffer:
         batch = random.sample(self._buffer, batch_size)
         states = np.stack([t.state for t in batch])
         head_indices = np.array([t.head_index for t in batch], dtype=np.int64)
-        actions = np.array([t.action for t in batch], dtype=np.int64)
+        actions = np.array([t.action.value for t in batch], dtype=np.int64)
         rewards = np.array([t.reward for t in batch], dtype=np.float32)
         next_states = np.stack([t.next_state for t in batch])
         dones = np.array([t.done for t in batch], dtype=np.float32)
@@ -120,7 +137,9 @@ class ReplayBuffer:
 class DQNModel(nn.Module):
     def __init__(
         self,
-        in_channels: int,
+        conv_in_channels: int,
+        conv_hidden_channels: int,
+        conv_out_channels: int,
         height: int,
         width: int,
         num_heads: int,
@@ -131,14 +150,37 @@ class DQNModel(nn.Module):
         self._num_heads = num_heads
         self._num_actions = num_actions
 
+        # 7 convolutional layers, so that each tile can "see" the entire map
         self.trunk = nn.Sequential(
-            nn.Conv2d(in_channels, 16, kernel_size=3, padding=1),
+            nn.Conv2d(conv_in_channels, conv_hidden_channels, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.Conv2d(
+                conv_hidden_channels, conv_hidden_channels, kernel_size=3, padding=1
+            ),
+            nn.ReLU(),
+            nn.Conv2d(
+                conv_hidden_channels, conv_hidden_channels, kernel_size=3, padding=1
+            ),
+            nn.ReLU(),
+            nn.Conv2d(
+                conv_hidden_channels, conv_hidden_channels, kernel_size=3, padding=1
+            ),
+            nn.ReLU(),
+            nn.Conv2d(
+                conv_hidden_channels, conv_hidden_channels, kernel_size=3, padding=1
+            ),
+            nn.ReLU(),
+            nn.Conv2d(
+                conv_hidden_channels, conv_hidden_channels, kernel_size=3, padding=1
+            ),
+            nn.ReLU(),
+            nn.Conv2d(
+                conv_hidden_channels, conv_out_channels, kernel_size=3, padding=1
+            ),
             nn.ReLU(),
         )
 
-        conv_out_dim = 32 * height * width
+        conv_out_dim = conv_out_channels * height * width
         self.fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(conv_out_dim, hidden_dim),
@@ -161,3 +203,7 @@ class DQNModel(nn.Module):
 
     def load(self, path: str) -> None:
         self.load_state_dict(torch.load(path, map_location="cpu"))
+
+
+ACTION_ORDER = ActionType.ordered()
+NUM_ACTIONS = len(ACTION_ORDER)

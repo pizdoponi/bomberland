@@ -7,16 +7,26 @@ from typing import Deque, Dict, List, Tuple
 import numpy as np
 
 from dqn_config import DQNConfig
+from dqn_model import ActionType
 from types_ import AgentId, EntityType, GameState as TypedGameState
 
-ACTIONS = ["up", "down", "left", "right", "bomb", "detonate", "wait"]
-
-MOVE_ACTIONS = {
-    "up": (0, 1),
-    "down": (0, -1),
-    "left": (-1, 0),
-    "right": (1, 0),
+MOVE_DELTAS = {
+    ActionType.UP: (0, 1),
+    ActionType.DOWN: (0, -1),
+    ActionType.LEFT: (-1, 0),
+    ActionType.RIGHT: (1, 0),
 }
+
+MOVE_BY_ACTION = {
+    ActionType.UP: "up",
+    ActionType.DOWN: "down",
+    ActionType.LEFT: "left",
+    ActionType.RIGHT: "right",
+}
+
+
+def action_to_move(action_type: ActionType) -> str | None:
+    return MOVE_BY_ACTION.get(action_type)
 
 
 @dataclass
@@ -108,26 +118,26 @@ class DQNFeatureBuilder:
     ) -> List[int]:
         unit = game_state.get_unit(unit_id)
         if unit is None:
-            return [ACTIONS.index("wait")]
+            return [ActionType.WAIT.value]
         x, y = unit.x, unit.y
         width = game_state.world.width
         height = game_state.world.height
 
         legal = []
-        for action in ["up", "down", "left", "right"]:
-            dx, dy = MOVE_ACTIONS[action]
+        for action in [ActionType.UP, ActionType.DOWN, ActionType.LEFT, ActionType.RIGHT]:
+            dx, dy = MOVE_DELTAS[action]
             nx, ny = x + dx, y + dy
             if self._is_walkable(nx, ny, width, height, cache.blocked_positions):
-                legal.append(ACTIONS.index(action))
+                legal.append(action.value)
 
         bombs = float(unit.inventory.bombs)
         if bombs > 0:
-            legal.append(ACTIONS.index("bomb"))
+            legal.append(ActionType.PLACE_BOMB.value)
 
         if cache.team_bombs:
-            legal.append(ACTIONS.index("detonate"))
+            legal.append(ActionType.DETONATE_BOMB.value)
 
-        legal.append(ACTIONS.index("wait"))
+        legal.append(ActionType.WAIT.value)
         return legal
 
     def unit_to_head_index(self, unit_id: str, sorted_units: List[str]) -> int | None:

@@ -6,10 +6,9 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
-
 from dqn_config import DQNConfig
-from dqn_model import DQNModel
-from dqn_shared import ACTIONS, DQNFeatureBuilder
+from dqn_model import NUM_ACTIONS, ActionType, DQNModel
+from dqn_shared import DQNFeatureBuilder, action_to_move
 from game_state import GameState
 from types_ import GameState as TypedGameState
 
@@ -52,11 +51,11 @@ class DQNAgent:
         if self._model is None:
             in_channels = self._feature_builder.channels * self.config.frame_stack_size
             self._model = DQNModel(
-                in_channels=in_channels,
+                conv_in_channels=in_channels,
                 height=typed_state.world.height,
                 width=typed_state.world.width,
                 num_heads=self._feature_builder.num_heads,
-                num_actions=len(ACTIONS),
+                num_actions=NUM_ACTIONS,
                 hidden_dim=self.config.hidden_dim,
             ).to(self._device)
             if os.path.exists(self.config.load_path):
@@ -95,30 +94,31 @@ class DQNAgent:
                 typed_state, unit_id, cache
             )
             action_index = self._select_action(q_values[head_index], legal_actions)
-            await self._execute_action(unit_id, action_index, cache.team_bombs)
+            action_type = ActionType.from_index(action_index)
+            await self._execute_action(unit_id, action_type, cache.team_bombs)
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
         if not legal_actions:
-            return ACTIONS.index("wait")
+            return ActionType.WAIT.value
         return max(legal_actions, key=lambda idx: q_values[idx])
 
     async def _execute_action(
-        self, unit_id: str, action_index: int, team_bombs: List[Tuple[int, int]]
+        self, unit_id: str, action_type: ActionType, team_bombs: List[Tuple[int, int]]
     ) -> None:
-        action = ACTIONS[action_index]
+        move = action_to_move(action_type)
 
-        if action in {"up", "down", "left", "right"}:
-            await self._client.send_move(action, unit_id)
-        elif action == "bomb":
+        if move is not None:
+            await self._client.send_move(move, unit_id)
+        elif action_type == ActionType.PLACE_BOMB:
             await self._client.send_bomb(unit_id)
-        elif action == "detonate":
+        elif action_type == ActionType.DETONATE_BOMB:
             if team_bombs:
                 x, y = team_bombs[0]
                 await self._client.send_detonate(x, y, unit_id)
-        elif action == "wait":
+        elif action_type == ActionType.WAIT:
             return
         else:
-            logger.warning("Unhandled action %s for unit %s", action, unit_id)
+            logger.warning("Unhandled action %s for unit %s", action_type, unit_id)
 
 
 def main() -> None:

@@ -7,10 +7,9 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
-
 from dqn_config import DQNConfig
-from dqn_model import DQNModel, ReplayBuffer
-from dqn_shared import ACTIONS, DQNFeatureBuilder
+from dqn_model import NUM_ACTIONS, ActionType, DQNModel, ReplayBuffer
+from dqn_shared import DQNFeatureBuilder, action_to_move
 from game_state import GameState
 from types_ import GameState as TypedGameState
 
@@ -43,7 +42,7 @@ class DQNTrainer:
         self._replay_buffer = ReplayBuffer(self.config.replay_capacity)
 
         self._last_state: Dict[str, np.ndarray] = {}
-        self._last_action: Dict[str, int] = {}
+        self._last_action: Dict[str, ActionType] = {}
         self._last_metrics: Dict[str, Dict[str, float]] = {}
         self._step_count = 0
 
@@ -64,19 +63,19 @@ class DQNTrainer:
         if self._model is None:
             in_channels = self._feature_builder.channels * self.config.frame_stack_size
             self._model = DQNModel(
-                in_channels=in_channels,
+                conv_in_channels=in_channels,
                 height=typed_state.world.height,
                 width=typed_state.world.width,
                 num_heads=self._feature_builder.num_heads,
-                num_actions=len(ACTIONS),
+                num_actions=NUM_ACTIONS,
                 hidden_dim=self.config.hidden_dim,
             ).to(self._device)
             self._target_model = DQNModel(
-                in_channels=in_channels,
+                conv_in_channels=in_channels,
                 height=typed_state.world.height,
                 width=typed_state.world.width,
                 num_heads=self._feature_builder.num_heads,
-                num_actions=len(ACTIONS),
+                num_actions=NUM_ACTIONS,
                 hidden_dim=self.config.hidden_dim,
             ).to(self._device)
             self._optimizer = torch.optim.AdamW(
@@ -166,10 +165,11 @@ class DQNTrainer:
                 typed_state, unit_id, cache
             )
             action_index = self._select_action(q_values[head_index], legal_actions)
-            await self._execute_action(unit_id, action_index, cache.team_bombs)
+            action_type = ActionType.from_index(action_index)
+            await self._execute_action(unit_id, action_type, cache.team_bombs)
 
             self._last_state[unit_id] = stacked_state
-            self._last_action[unit_id] = action_index
+            self._last_action[unit_id] = action_type
             self._last_metrics[unit_id] = metrics
 
         self._train_step()
@@ -223,28 +223,28 @@ class DQNTrainer:
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
         if not legal_actions:
-            return ACTIONS.index("wait")
+            return ActionType.WAIT.value
         if random.random() < self._epsilon:
             return random.choice(legal_actions)
         return max(legal_actions, key=lambda idx: q_values[idx])
 
     async def _execute_action(
-        self, unit_id: str, action_index: int, team_bombs: List[Tuple[int, int]]
+        self, unit_id: str, action_type: ActionType, team_bombs: List[Tuple[int, int]]
     ) -> None:
-        action = ACTIONS[action_index]
+        move = action_to_move(action_type)
 
-        if action in {"up", "down", "left", "right"}:
-            await self._client.send_move(action, unit_id)
-        elif action == "bomb":
+        if move is not None:
+            await self._client.send_move(move, unit_id)
+        elif action_type == ActionType.PLACE_BOMB:
             await self._client.send_bomb(unit_id)
-        elif action == "detonate":
+        elif action_type == ActionType.DETONATE_BOMB:
             if team_bombs:
                 x, y = team_bombs[0]
                 await self._client.send_detonate(x, y, unit_id)
-        elif action == "wait":
+        elif action_type == ActionType.WAIT:
             return
         else:
-            logger.warning("Unhandled action %s for unit %s", action, unit_id)
+            logger.warning("Unhandled action %s for unit %s", action_type, unit_id)
 
 
 def main() -> None:
