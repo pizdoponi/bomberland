@@ -3,8 +3,7 @@ import logging
 import os
 import random
 import time
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -22,16 +21,13 @@ logger = logging.getLogger(__name__)
 
 agent_uri = (
     os.environ.get("GAME_CONNECTION_STRING")
-    or "ws://127.0.0.1:3000/?role=agent&agentId=agentA&name=dqn"
+    or "ws://game-engine:3000/?role=agent&agentId=agentA&name=dqn-train"
 )
-admin_uri = "ws://127.0.0.1:3000/?role=admin"
-
-print("dqn trainer says hello")
+admin_uri = "ws://game-engine:3000/?role=admin"
 
 
 class DQNTrainer:
     def __init__(self) -> None:
-        print("__init__")
         self.admin_client = GameState(admin_uri)
         self.agent_client = GameState(agent_uri)
 
@@ -50,10 +46,7 @@ class DQNTrainer:
         self._step_count = 0
 
     async def run(self):
-        print("__run__")
-        print("creating agent connection")
         agent_connection = await self.agent_client.connect()
-        print("creating admin connection")
         admin_connection = await self.admin_client.connect()
 
         self.agent_client.set_game_tick_callback(self._on_game_tick)
@@ -283,25 +276,6 @@ class DQNTrainer:
             world_seed=world_seed, prng_seed=prng_seed
         )
         await self.admin_client.send_request_tick()
-
-    def _split_connection_uris(
-        self, connection_uri: str, admin_uri: Optional[str]
-    ) -> Tuple[str, Optional[str]]:
-        if admin_uri:
-            return connection_uri, admin_uri
-        parsed = urlparse(connection_uri)
-        query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-        query = dict(query_pairs)
-        role = query.get("role")
-        if role != "admin":
-            admin_query = dict(query)
-            admin_query["role"] = "admin"
-            admin_uri = urlunparse(parsed._replace(query=urlencode(admin_query)))
-            return connection_uri, admin_uri
-        query["role"] = "agent"
-        agent_query = urlencode(query)
-        agent_uri = urlunparse(parsed._replace(query=agent_query))
-        return agent_uri, connection_uri
 
 
 def main() -> None:
