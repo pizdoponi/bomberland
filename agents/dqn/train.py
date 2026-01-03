@@ -45,6 +45,7 @@ class DQNTrainer:
         self._last_action: Dict[str, ActionType] = {}
         self._last_metrics: Dict[str, Dict[str, float]] = {}
         self._step_count = 0
+        self._first_tick_event = asyncio.Event()
 
     async def run(self):
         agent_connection = await self.agent_client.connect()
@@ -54,15 +55,19 @@ class DQNTrainer:
         self.admin_client.set_endgame_callback(self._on_endgame)
 
         admin_task = asyncio.create_task(
-            self.admin_client._handle_messages(admin_connection)
+            self.admin_client._handle_messages(admin_connection)  # type: ignore
         )
         agent_task = asyncio.create_task(
-            self.agent_client._handle_messages(agent_connection)
+            self.agent_client._handle_messages(agent_connection)  # type: ignore
         )
-        await self.admin_client.send_request_tick()
-        await asyncio.gather(admin_task, agent_task)
+
+        kickoff_task = asyncio.create_task(self._ensure_first_tick())
+        await asyncio.gather(admin_task, agent_task, kickoff_task)
 
     async def _on_game_tick(self, tick_number: int, game_state: Dict):
+        if not self._first_tick_event.is_set():
+            self._first_tick_event.set()
+
         self._step_count += 1
 
         typed_state = TypedGameState.from_dict(game_state)
@@ -199,8 +204,7 @@ class DQNTrainer:
                 self.config.epsilon_start * self.config.epsilon_decay,
             )
 
-        if self.admin_client is not None:
-            await self.admin_client.send_request_tick()
+        await self.admin_client.send_request_tick()
 
     def _train_step(self) -> None:
         if len(self._replay_buffer) < self.config.batch_size:
@@ -242,8 +246,12 @@ class DQNTrainer:
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
         if not legal_actions:
+            logger.warning("No legal actions available, defaulting to NOOP")
             return ActionType.NOOP.value
         if random.random() < self.config.epsilon_start:
+            logger.debug(
+                "Selecting random action due to epsilon %.3f", self.config.epsilon_start
+            )
             return random.choice(legal_actions)
         return max(legal_actions, key=lambda idx: q_values[idx])
 
@@ -278,6 +286,12 @@ class DQNTrainer:
             world_seed=world_seed, prng_seed=prng_seed
         )
         await self.admin_client.send_request_tick()
+
+    async def _ensure_first_tick(self) -> None:
+        # Initial request_tick can be ignored if the game hasn't started yet.
+        while not self._first_tick_event.is_set():
+            await self.admin_client.send_request_tick()
+            await asyncio.sleep(0.5)
 
 
 def main() -> None:
