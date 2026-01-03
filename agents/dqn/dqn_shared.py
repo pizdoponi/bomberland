@@ -38,7 +38,7 @@ class DQNCache:
 class DQNFeatureBuilder:
     def __init__(self, config: DQNConfig):
         self.config = config
-        self.num_channels = 16
+        self.num_channels = 17
         self.num_heads = 3
         self._frame_stack: Deque[np.ndarray] = deque(
             maxlen=self.config.frame_stack_size
