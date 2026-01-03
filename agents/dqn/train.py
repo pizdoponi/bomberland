@@ -31,15 +31,14 @@ class DQNTrainer:
         self._client.set_game_tick_callback(self._on_game_tick)
 
         self.config = DQNConfig.from_env()
-        self._epsilon = self.config.epsilon_start
 
         self._device = torch.device(self.config.device)
 
         self._feature_builder = DQNFeatureBuilder(self.config)
 
-        self._model = None
-        self._target_model = None
-        self._optimizer = None
+        self._model: DQNModel = None  # pyright: ignore[reportAttributeAccessIssue]
+        self._target_model: DQNModel = None  # pyright: ignore[reportAttributeAccessIssue]
+        self._optimizer: torch.optim.adamw.AdamW = None  # pyright: ignore[reportAttributeAccessIssue]
         self._replay_buffer = ReplayBuffer(self.config.replay_capacity)
 
         self._last_state: Dict[str, np.ndarray] = {}
@@ -49,7 +48,7 @@ class DQNTrainer:
 
         loop = asyncio.get_event_loop()
         connection = loop.run_until_complete(self._client.connect())
-        tasks = [asyncio.ensure_future(self._client._handle_messages(connection))]
+        tasks = [asyncio.ensure_future(self._client._handle_messages(connection))]  # pyright: ignore[reportArgumentType]
         loop.run_until_complete(asyncio.wait(tasks))
 
     async def _on_game_tick(self, tick_number: int, game_state: Dict):
