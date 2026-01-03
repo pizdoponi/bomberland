@@ -17,21 +17,23 @@ from types_ import (
     DetonateAction,
     MoveAction,
     Point,
+    SkipAction,
 )
 
 
 class ActionType(Enum):
-    UP = 0
-    DOWN = 1
-    LEFT = 2
-    RIGHT = 3
-    PLACE_BOMB = 4
-    DETONATE_BOMB = 5
-    SKIP = 6
+    NOOP = 0
+    UP = 1
+    RIGHT = 2
+    DOWN = 3
+    LEFT = 4
+    PLACE_BOMB = 5
+    DETONATE_BOMB = 6
 
     @classmethod
     def ordered(cls) -> list["ActionType"]:
         return [
+            cls.NOOP,
             cls.UP,
             cls.DOWN,
             cls.LEFT,
@@ -53,6 +55,7 @@ class ActionType(Enum):
             )
 
         mapping = {
+            ActionType.NOOP: SkipAction(unit_id=unit_id),
             ActionType.UP: MoveAction.from_direction(unit_id=unit_id, direction="up"),
             ActionType.DOWN: MoveAction.from_direction(
                 unit_id=unit_id, direction="down"
