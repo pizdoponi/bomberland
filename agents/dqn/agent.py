@@ -54,6 +54,8 @@ class DQNAgent:
             )
             self._model = DQNModel(
                 conv_in_channels=in_channels,
+                conv_hidden_channels=self.config.conv_hidden_channels,
+                conv_out_channels=self.config.conv_out_channels,
                 height=typed_state.world.height,
                 width=typed_state.world.width,
                 num_heads=self._feature_builder.num_heads,
@@ -69,9 +71,7 @@ class DQNAgent:
                     self.config.load_path,
                 )
 
-        frame = self._feature_builder.encode_frame(
-            typed_state, typed_state.my_agent_id
-        )
+        frame = self._feature_builder.encode_frame(typed_state)
         stacked_state = self._feature_builder.update_frame_stack(frame)
         cache = self._feature_builder.build_cache(typed_state)
 
