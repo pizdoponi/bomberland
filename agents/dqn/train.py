@@ -19,9 +19,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-uri = os.environ.get(
-    "GAME_CONNECTION_STRING"
-) or "ws://127.0.0.1:3000/?role=agent&agentId=agentId&name=defaultName"
+uri = (
+    os.environ.get("GAME_CONNECTION_STRING")
+    or "ws://127.0.0.1:3000/?role=admin&agentId=agentId&name=dqn"
+)
 
 
 class DQNTrainer:
@@ -61,9 +62,13 @@ class DQNTrainer:
         enemy_units = typed_state.enemy_units
 
         if self._model is None:
-            in_channels = self._feature_builder.channels * self.config.frame_stack_size
+            in_channels = (
+                self._feature_builder.num_channels * self.config.frame_stack_size
+            )
             self._model = DQNModel(
                 conv_in_channels=in_channels,
+                conv_hidden_channels=self.config.conv_hidden_channels,
+                conv_out_channels=self.config.conv_out_channels,
                 height=typed_state.world.height,
                 width=typed_state.world.width,
                 num_heads=self._feature_builder.num_heads,
@@ -72,13 +77,15 @@ class DQNTrainer:
             ).to(self._device)
             self._target_model = DQNModel(
                 conv_in_channels=in_channels,
+                conv_hidden_channels=self.config.conv_hidden_channels,
+                conv_out_channels=self.config.conv_out_channels,
                 height=typed_state.world.height,
                 width=typed_state.world.width,
                 num_heads=self._feature_builder.num_heads,
                 num_actions=NUM_ACTIONS,
                 fc_hidden_dim=self.config.hidden_dim,
             ).to(self._device)
-            self._optimizer = torch.optim.AdamW(
+            self._optimizer = torch.optim.adamw.AdamW(
                 self._model.parameters(), lr=self.config.learning_rate
             )
             if os.path.exists(self.config.load_path):
@@ -86,9 +93,7 @@ class DQNTrainer:
                 self._target_model.load_state_dict(self._model.state_dict())
                 logger.info("Loaded checkpoint from %s", self.config.load_path)
 
-        frame = self._feature_builder.encode_frame(
-            typed_state, typed_state.my_agent_id
-        )
+        frame = self._feature_builder.encode_frame(typed_state)
         stacked_state = self._feature_builder.update_frame_stack(frame)
 
         cache = self._feature_builder.build_cache(typed_state)

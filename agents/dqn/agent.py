@@ -49,7 +49,9 @@ class DQNAgent:
         my_units_sorted = sorted([unit.unit_id for unit in my_units])
 
         if self._model is None:
-            in_channels = self._feature_builder.channels * self.config.frame_stack_size
+            in_channels = (
+                self._feature_builder.num_channels * self.config.frame_stack_size
+            )
             self._model = DQNModel(
                 conv_in_channels=in_channels,
                 height=typed_state.world.height,

@@ -367,6 +367,28 @@ class Entity:
         diameter = self.blast_diameter_(unit)
         return max(0, diameter // 2)
 
+    def time_until_expires(self, current_tick: int) -> Optional[float]:
+        """Return number of ticks until this entity expires.
+
+        If the entity does not have an expiration tick, returns None.
+        Normalized to the interval [0, 1] based on the lifetime of the entity type.
+        A value of 1.0 means just created, 0.0 means about to expire.
+        Value 0.0 means no entity (when creating a frame).
+        """
+        entity_type_lifetimes = {
+            EntityType.BOMB: 30,
+            EntityType.BLAST: 5,
+            EntityType.BLAST_POWERUP: 40,
+            EntityType.FREEZE_POWERUP: 40,
+        }
+        if self.expires is None:
+            return None
+        return max(
+            0,
+            (self.expires - current_tick)
+            / entity_type_lifetimes.get(self.entity_type, 1),
+        )
+
 
 @dataclass
 class World:
