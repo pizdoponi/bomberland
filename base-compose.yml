@@ -28,6 +28,20 @@ services:
         volumes:
             - ./agents/kamikaze:/app
 
+    dqn:
+        build:
+            context: agents/dqn
+            dockerfile: Dockerfile.dev
+        volumes:
+            - ./agents/dqn:/app
+
+    dqn-train:
+        build:
+            context: agents/dqn
+            dockerfile: Dockerfile.train
+        volumes:
+            - ./agents/dqn:/app
+
     python3-agent:
         build:
             context: agents/python3

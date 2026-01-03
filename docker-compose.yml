@@ -7,15 +7,15 @@ services:
         ports:
             - 3000:3000
         environment:
-            - ADMIN_ROLE_ENABLED=0
+            - ADMIN_ROLE_ENABLED=1
             - AGENT_ID_MAPPING=agentA,agentB
             - INITIAL_HP=3
             - PRNG_SEED=1234
             - SHUTDOWN_ON_GAME_END_ENABLED=0
             - TELEMETRY_ENABLED=1
             - TICK_RATE_HZ=10
-            - TRAINING_MODE_ENABLED=0
-            - WORLD_SEED=9999
+            - TRAINING_MODE_ENABLED=1
+            - WORLD_SEED=312316
         deploy:
             resources:
                 limits:
@@ -29,9 +29,9 @@ services:
         extends:
             file: base-compose.yml
             # update next line with a service in base-compose.yml to change agent
-            service: kamikaze
+            service: dqn-train
         environment:
-            - GAME_CONNECTION_STRING=ws://game-engine:3000/?role=agent&agentId=agentA&name=kamikaze
+            - GAME_CONNECTION_STRING=ws://game-engine:3000/?role=agent&agentId=agentA&name=dqn-train
         depends_on:
             - game-engine
         deploy:
