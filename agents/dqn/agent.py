@@ -60,7 +60,7 @@ class DQNAgent:
                 width=typed_state.world.width,
                 num_heads=self._feature_builder.num_heads,
                 num_actions=NUM_ACTIONS,
-                fc_hidden_dim=self.config.hidden_dim,
+                fc_hidden_dim=self.config.fc_hidden_dim,
             ).to(self._device)
             if os.path.exists(self.config.load_path):
                 self._model.load(self.config.load_path)
@@ -86,7 +86,7 @@ class DQNAgent:
             if unit_state is None or not unit_state.is_alive():
                 continue
 
-            head_index = self._feature_builder.unit_to_head_index(
+            head_index = self._feature_builder.unit_id_to_head_index(
                 unit_id, my_units_sorted
             )
             if head_index is None:

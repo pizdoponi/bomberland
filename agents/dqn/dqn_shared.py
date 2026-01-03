@@ -157,7 +157,9 @@ class DQNFeatureBuilder:
         legal.append(ActionType.NOOP.value)
         return legal
 
-    def unit_to_head_index(self, unit_id: str, sorted_units: List[str]) -> int | None:
+    def unit_id_to_head_index(
+        self, unit_id: str, sorted_units: List[str]
+    ) -> int | None:
         if unit_id not in sorted_units:
             return None
         idx = sorted_units.index(unit_id)
