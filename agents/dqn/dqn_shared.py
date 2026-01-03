@@ -5,23 +5,23 @@ from dataclasses import dataclass
 from typing import Deque, Dict, List, Tuple
 
 import numpy as np
-
 from dqn_config import DQNConfig
 from dqn_model import ActionType
-from types_ import AgentId, EntityType, GameState as TypedGameState
+from types_ import EntityType
+from types_ import GameState as TypedGameState
 
 MOVE_DELTAS = {
     ActionType.UP: (0, 1),
+    ActionType.RIGHT: (1, 0),
     ActionType.DOWN: (0, -1),
     ActionType.LEFT: (-1, 0),
-    ActionType.RIGHT: (1, 0),
 }
 
 MOVE_BY_ACTION = {
     ActionType.UP: "up",
+    ActionType.RIGHT: "right",
     ActionType.DOWN: "down",
     ActionType.LEFT: "left",
-    ActionType.RIGHT: "right",
 }
 
 
@@ -36,10 +36,10 @@ class DQNCache:
 
 
 class DQNFeatureBuilder:
-    def __init__(self, config: DQNConfig, channels: int = 8, num_heads: int = 3):
+    def __init__(self, config: DQNConfig):
         self.config = config
-        self.channels = channels
-        self.num_heads = num_heads
+        self.num_channels = 16
+        self.num_heads = 3
         self._frame_stack: Deque[np.ndarray] = deque(
             maxlen=self.config.frame_stack_size
         )
@@ -56,10 +56,10 @@ class DQNFeatureBuilder:
         stacked = np.concatenate(list(self._frame_stack), axis=0)
         return stacked
 
-    def encode_frame(self, game_state: TypedGameState, my_agent_id: AgentId) -> np.ndarray:
-        width = game_state.world.width
+    def encode_frame(self, game_state: TypedGameState) -> np.ndarray:
         height = game_state.world.height
-        frame = np.zeros((self.channels, height, width), dtype=np.float32)
+        width = game_state.world.width
+        frame = np.zeros((self.num_channels, height, width), dtype=np.float32)
 
         for entity in game_state.entities:
             x, y = entity.x, entity.y
@@ -70,24 +70,36 @@ class DQNFeatureBuilder:
                 frame[1, y, x] = min(hp / self.config.max_ore_hp, 1.0)
             elif entity.entity_type == EntityType.WOOD_BLOCK:
                 frame[2, y, x] = 1.0
-            elif entity.entity_type == EntityType.BOMB:
-                frame[3, y, x] = 1.0
             elif entity.entity_type == EntityType.BLAST:
-                frame[4, y, x] = 1.0
+                frame[3, y, x] = entity.time_until_expires(game_state.tick) or 0.0
             elif entity.entity_type in {
-                EntityType.AMMO,
                 EntityType.BLAST_POWERUP,
                 EntityType.FREEZE_POWERUP,
             }:
-                frame[7, y, x] = 1.0
+                frame[4, y, x] = entity.time_until_expires(game_state.tick) or 0.0
+            elif entity.entity_type == EntityType.BOMB:
+                bomb_owner_id_to_frame_index = {
+                    "c": 5,
+                    "d": 6,
+                    "e": 7,
+                    "f": 8,
+                    "g": 9,
+                    "h": 10,
+                }
+                bomb_owner = entity.owner_unit_id
+                assert bomb_owner is not None, "Bomb owner_unit_id should not be None"
+                frame_index = bomb_owner_id_to_frame_index[bomb_owner]
+                frame[frame_index, y, x] = (
+                    entity.time_until_expires(game_state.tick) or 0.0
+                )
 
-        for unit in game_state.units.values():
-            if not unit.is_alive():
-                continue
-            if unit.agent_id == my_agent_id:
-                frame[5, unit.y, unit.x] = 1.0
-            else:
-                frame[6, unit.y, unit.x] = 1.0
+        for i, my_unit in enumerate(game_state.my_units):
+            frame[11 + i, my_unit.y, my_unit.x] = my_unit.hp / self.config.max_unit_hp
+
+        for i, enemy_unit in enumerate(game_state.enemy_units):
+            frame[14 + i, enemy_unit.y, enemy_unit.x] = (
+                enemy_unit.hp / self.config.max_unit_hp
+            )
 
         return frame
 
@@ -124,7 +136,12 @@ class DQNFeatureBuilder:
         height = game_state.world.height
 
         legal = []
-        for action in [ActionType.UP, ActionType.DOWN, ActionType.LEFT, ActionType.RIGHT]:
+        for action in [
+            ActionType.UP,
+            ActionType.RIGHT,
+            ActionType.DOWN,
+            ActionType.LEFT,
+        ]:
             dx, dy = MOVE_DELTAS[action]
             nx, ny = x + dx, y + dy
             if self._is_walkable(nx, ny, width, height, cache.blocked_positions):
