@@ -3,7 +3,8 @@ import logging
 import os
 import random
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import numpy as np
 import torch
@@ -12,7 +13,6 @@ from dqn_model import NUM_ACTIONS, ActionType, DQNModel, ReplayBuffer
 from dqn_shared import DQNFeatureBuilder, action_to_move
 from game_state import GameState
 from types_ import GameState as TypedGameState
-from types_ import Role
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,22 +20,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-uri = (
+agent_uri = (
     os.environ.get("GAME_CONNECTION_STRING")
-    or "ws://127.0.0.1:3000/?role=admin&agentId=agentA&name=dqn"
+    or "ws://127.0.0.1:3000/?role=agent&agentId=agentA&name=dqn"
 )
+admin_uri = "ws://127.0.0.1:3000/?role=admin"
+
+print("dqn trainer says hello")
 
 
 class DQNTrainer:
     def __init__(self) -> None:
-        self._client = GameState(uri)
-        self._client.set_game_tick_callback(self._on_game_tick)
-        self._client.set_endgame_callback(self._on_endgame)
-        self._is_admin_connection = "role=admin" in uri.lower()
+        print("__init__")
+        self.admin_client = GameState(admin_uri)
+        self.agent_client = GameState(agent_uri)
 
         self.config = DQNConfig.from_env()
-
-        self._device = torch.device(self.config.device)
 
         self._feature_builder = DQNFeatureBuilder(self.config)
 
@@ -49,12 +49,24 @@ class DQNTrainer:
         self._last_metrics: Dict[str, Dict[str, float]] = {}
         self._step_count = 0
 
-        loop = asyncio.get_event_loop()
-        connection = loop.run_until_complete(self._client.connect())
-        if self._is_admin_connection:
-            loop.run_until_complete(self._client.send_request_tick())
-        tasks = [asyncio.ensure_future(self._client._handle_messages(connection))]  # pyright: ignore[reportArgumentType]
-        loop.run_until_complete(asyncio.wait(tasks))
+    async def run(self):
+        print("__run__")
+        print("creating agent connection")
+        agent_connection = await self.agent_client.connect()
+        print("creating admin connection")
+        admin_connection = await self.admin_client.connect()
+
+        self.agent_client.set_game_tick_callback(self._on_game_tick)
+        self.admin_client.set_endgame_callback(self._on_endgame)
+
+        admin_task = asyncio.create_task(
+            self.admin_client._handle_messages(admin_connection)
+        )
+        agent_task = asyncio.create_task(
+            self.agent_client._handle_messages(agent_connection)
+        )
+        await self.admin_client.send_request_tick()
+        await asyncio.gather(admin_task, agent_task)
 
     async def _on_game_tick(self, tick_number: int, game_state: Dict):
         self._step_count += 1
@@ -192,8 +204,8 @@ class DQNTrainer:
                 self.config.epsilon_min, self._epsilon * self.config.epsilon_decay
             )
 
-        if typed_state.connection.role == Role.ADMIN:
-            await self._client.send_request_tick()
+        if self.admin_client is not None:
+            await self.admin_client.send_request_tick()
 
     def _train_step(self) -> None:
         if len(self._replay_buffer) < self.config.batch_size:
@@ -246,20 +258,20 @@ class DQNTrainer:
         move = action_to_move(action_type)
 
         if move is not None:
-            await self._client.send_move(move, unit_id)
+            await self.agent_client.send_move(move, unit_id)
         elif action_type == ActionType.PLACE_BOMB:
-            await self._client.send_bomb(unit_id)
+            await self.agent_client.send_bomb(unit_id)
         elif action_type == ActionType.DETONATE_BOMB:
             if team_bombs:
                 x, y = team_bombs[0]
-                await self._client.send_detonate(x, y, unit_id)
+                await self.agent_client.send_detonate(x, y, unit_id)
         elif action_type == ActionType.NOOP:
             return
         else:
             logger.warning("Unhandled action %s for unit %s", action_type, unit_id)
 
     async def _on_endgame(self, payload: Dict) -> None:
-        if not self._is_admin_connection:
+        if self.admin_client is None:
             return
         self._feature_builder.reset_stack()
         self._last_state.clear()
@@ -267,17 +279,38 @@ class DQNTrainer:
         self._last_metrics.clear()
         world_seed = random.randint(0, 2**31 - 1)
         prng_seed = random.randint(0, 2**31 - 1)
-        await self._client.send_request_game_reset(
+        await self.admin_client.send_request_game_reset(
             world_seed=world_seed, prng_seed=prng_seed
         )
-        await self._client.send_request_tick()
+        await self.admin_client.send_request_tick()
+
+    def _split_connection_uris(
+        self, connection_uri: str, admin_uri: Optional[str]
+    ) -> Tuple[str, Optional[str]]:
+        if admin_uri:
+            return connection_uri, admin_uri
+        parsed = urlparse(connection_uri)
+        query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        query = dict(query_pairs)
+        role = query.get("role")
+        if role != "admin":
+            admin_query = dict(query)
+            admin_query["role"] = "admin"
+            admin_uri = urlunparse(parsed._replace(query=urlencode(admin_query)))
+            return connection_uri, admin_uri
+        query["role"] = "agent"
+        agent_query = urlencode(query)
+        agent_uri = urlunparse(parsed._replace(query=agent_query))
+        return agent_uri, connection_uri
 
 
 def main() -> None:
     for _ in range(0, 10):
         while True:
             try:
-                DQNTrainer()
+                trainer = DQNTrainer()
+                asyncio.run(trainer.run())
+
             except Exception as exc:
                 logger.error("Trainer error: %s", exc)
                 time.sleep(5)
