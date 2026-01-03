@@ -205,27 +205,12 @@ class DQNModel(nn.Module):
         num_actions: int = NUM_ACTIONS,
     ) -> None:
         super().__init__()
-        self._num_heads = num_heads
-        self._num_actions = num_actions
-
         # 7 convolutional layers, so that each tile can "see" the entire map
-        self.conv_layers = (
-            [
-                nn.Conv2d(
-                    conv_in_channels, conv_hidden_channels, kernel_size=3, padding=1
-                )
-            ]
-            + [
-                nn.Conv2d(
-                    conv_hidden_channels, conv_hidden_channels, kernel_size=3, padding=1
-                )
-                for _ in range(5)
-            ]
-            + [
-                nn.Conv2d(
-                    conv_hidden_channels, conv_out_channels, kernel_size=3, padding=1
-                )
-            ]
+        self.stem = nn.Sequential(
+            ResNetBlock(conv_in_channels, conv_hidden_channels),
+            ResNetBlock(conv_hidden_channels, conv_hidden_channels),
+            ResNetBlock(conv_hidden_channels, conv_hidden_channels),
+            ResNetBlock(conv_hidden_channels, conv_out_channels),
         )
 
         conv_out_dim = conv_out_channels * height * width
@@ -240,13 +225,12 @@ class DQNModel(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = x
-        for conv in self.conv_layers:
-            x = nn.ReLU(conv(x)) + identity
-
-        features = self.fc(x)
-        head_outputs = [head(features) for head in self.heads]
-        return torch.stack(head_outputs, dim=1)
+        out = self.stem(x)
+        out = self.fc(out)
+        head_outputs = [head(out) for head in self.heads]
+        return torch.stack(
+            head_outputs, dim=1
+        )  # shape: (batch_size, num_heads, num_actions)
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -254,5 +238,3 @@ class DQNModel(nn.Module):
 
     def load(self, path: str) -> None:
         self.load_state_dict(torch.load(path, map_location="cpu"))
-
-
