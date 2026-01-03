@@ -118,7 +118,7 @@ class DQNFeatureBuilder:
     ) -> List[int]:
         unit = game_state.get_unit(unit_id)
         if unit is None:
-            return [ActionType.WAIT.value]
+            return [ActionType.NOOP.value]
         x, y = unit.x, unit.y
         width = game_state.world.width
         height = game_state.world.height
@@ -137,7 +137,7 @@ class DQNFeatureBuilder:
         if cache.team_bombs:
             legal.append(ActionType.DETONATE_BOMB.value)
 
-        legal.append(ActionType.WAIT.value)
+        legal.append(ActionType.NOOP.value)
         return legal
 
     def unit_to_head_index(self, unit_id: str, sorted_units: List[str]) -> int | None:

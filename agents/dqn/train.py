@@ -68,7 +68,7 @@ class DQNTrainer:
                 width=typed_state.world.width,
                 num_heads=self._feature_builder.num_heads,
                 num_actions=NUM_ACTIONS,
-                hidden_dim=self.config.hidden_dim,
+                fc_hidden_dim=self.config.hidden_dim,
             ).to(self._device)
             self._target_model = DQNModel(
                 conv_in_channels=in_channels,
@@ -76,7 +76,7 @@ class DQNTrainer:
                 width=typed_state.world.width,
                 num_heads=self._feature_builder.num_heads,
                 num_actions=NUM_ACTIONS,
-                hidden_dim=self.config.hidden_dim,
+                fc_hidden_dim=self.config.hidden_dim,
             ).to(self._device)
             self._optimizer = torch.optim.AdamW(
                 self._model.parameters(), lr=self.config.learning_rate
@@ -223,7 +223,7 @@ class DQNTrainer:
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
         if not legal_actions:
-            return ActionType.WAIT.value
+            return ActionType.NOOP.value
         if random.random() < self._epsilon:
             return random.choice(legal_actions)
         return max(legal_actions, key=lambda idx: q_values[idx])
@@ -241,7 +241,7 @@ class DQNTrainer:
             if team_bombs:
                 x, y = team_bombs[0]
                 await self._client.send_detonate(x, y, unit_id)
-        elif action_type == ActionType.WAIT:
+        elif action_type == ActionType.NOOP:
             return
         else:
             logger.warning("Unhandled action %s for unit %s", action_type, unit_id)

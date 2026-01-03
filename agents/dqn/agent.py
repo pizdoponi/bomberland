@@ -56,7 +56,7 @@ class DQNAgent:
                 width=typed_state.world.width,
                 num_heads=self._feature_builder.num_heads,
                 num_actions=NUM_ACTIONS,
-                hidden_dim=self.config.hidden_dim,
+                fc_hidden_dim=self.config.hidden_dim,
             ).to(self._device)
             if os.path.exists(self.config.load_path):
                 self._model.load(self.config.load_path)
@@ -99,7 +99,7 @@ class DQNAgent:
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
         if not legal_actions:
-            return ActionType.WAIT.value
+            return ActionType.NOOP.value
         return max(legal_actions, key=lambda idx: q_values[idx])
 
     async def _execute_action(
@@ -115,7 +115,7 @@ class DQNAgent:
             if team_bombs:
                 x, y = team_bombs[0]
                 await self._client.send_detonate(x, y, unit_id)
-        elif action_type == ActionType.WAIT:
+        elif action_type == ActionType.NOOP:
             return
         else:
             logger.warning("Unhandled action %s for unit %s", action_type, unit_id)
