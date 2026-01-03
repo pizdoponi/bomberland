@@ -9,6 +9,7 @@ from typing import Deque, NamedTuple, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 from types_ import (
     ActionPacket,
@@ -132,6 +133,63 @@ class ReplayBuffer:
 
     def __len__(self) -> int:
         return len(self._buffer)
+
+
+class ResNetBlock(nn.Module):
+    """
+    Basic ResNet block (2x 3x3 conv)
+    """
+
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
+        )
+        self.bn1 = nn.BatchNorm2d(out_channels)
+
+        self.conv2 = nn.Conv2d(
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+        # residual connection (identity or projection)
+        self.residual_connection = nn.Identity()
+        if stride != 1 or in_channels != out_channels:
+            self.residual_connection = nn.Sequential(
+                nn.Conv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(out_channels),
+            )
+
+    def forward(self, x):
+        identity = self.residual_connection(x)
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = F.relu(out, inplace=True)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        out += identity
+        out = F.relu(out, inplace=True)
+
+        return out
 
 
 class DQNModel(nn.Module):
