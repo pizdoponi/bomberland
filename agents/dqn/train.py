@@ -11,6 +11,7 @@ from dqn_config import DQNConfig
 from dqn_model import NUM_ACTIONS, ActionType, DQNModel, ReplayBuffer
 from dqn_shared import DQNFeatureBuilder, action_to_move
 from game_state import GameState
+from torch.optim.adamw import AdamW
 from types_ import GameState as TypedGameState
 
 logging.basicConfig(
@@ -37,7 +38,7 @@ class DQNTrainer:
 
         self._model: DQNModel = None  # pyright: ignore[reportAttributeAccessIssue]
         self._target_model: DQNModel = None  # pyright: ignore[reportAttributeAccessIssue]
-        self._optimizer: torch.optim.adamw.AdamW = None  # pyright: ignore[reportAttributeAccessIssue]
+        self._optimizer: AdamW = None  # pyright: ignore[reportAttributeAccessIssue]
         self._replay_buffer = ReplayBuffer(self.config.replay_capacity)
 
         self._last_state: Dict[str, np.ndarray] = {}
@@ -94,7 +95,7 @@ class DQNTrainer:
                 num_actions=NUM_ACTIONS,
                 fc_hidden_dim=self.config.hidden_dim,
             ).to(self.config.device)
-            self._optimizer = torch.optim.adamw.AdamW(
+            self._optimizer = AdamW(
                 self._model.parameters(), lr=self.config.learning_rate
             )
             if os.path.exists(self.config.load_path):
@@ -192,9 +193,10 @@ class DQNTrainer:
         if self._step_count % self.config.save_interval == 0:
             self._model.save(self.config.checkpoint_path)
 
-        if self._epsilon > self.config.epsilon_min:
-            self._epsilon = max(
-                self.config.epsilon_min, self._epsilon * self.config.epsilon_decay
+        if self.config.epsilon_start > self.config.epsilon_min:
+            self.config.epsilon_start = max(
+                self.config.epsilon_min,
+                self.config.epsilon_start * self.config.epsilon_decay,
             )
 
         if self.admin_client is not None:
@@ -235,13 +237,13 @@ class DQNTrainer:
                 "Training step %s, loss %.4f, epsilon %.3f",
                 self._step_count,
                 loss.item(),
-                self._epsilon,
+                self.config.epsilon_start,
             )
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
         if not legal_actions:
             return ActionType.NOOP.value
-        if random.random() < self._epsilon:
+        if random.random() < self.config.epsilon_start:
             return random.choice(legal_actions)
         return max(legal_actions, key=lambda idx: q_values[idx])
 
