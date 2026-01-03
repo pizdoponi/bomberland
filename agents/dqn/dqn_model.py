@@ -17,7 +17,6 @@ from types_ import (
     DetonateAction,
     MoveAction,
     Point,
-    SkipAction,
 )
 
 
@@ -28,7 +27,6 @@ class ActionType(Enum):
     RIGHT = 3
     PLACE_BOMB = 4
     DETONATE_BOMB = 5
-    WAIT = 6
     SKIP = 6
 
     @classmethod
@@ -40,7 +38,6 @@ class ActionType(Enum):
             cls.RIGHT,
             cls.PLACE_BOMB,
             cls.DETONATE_BOMB,
-            cls.WAIT,
         ]
 
     @classmethod
@@ -71,9 +68,12 @@ class ActionType(Enum):
                 unit_id=unit_id,
                 target=bomb_position,  # pyright: ignore[reportArgumentType]
             ),
-            ActionType.WAIT: SkipAction(unit_id=unit_id),
         }
         return mapping[self]
+
+
+ACTION_ORDER = ActionType.ordered()
+NUM_ACTIONS = len(ACTION_ORDER)
 
 
 @dataclass
@@ -198,60 +198,53 @@ class DQNModel(nn.Module):
         conv_in_channels: int,
         conv_hidden_channels: int,
         conv_out_channels: int,
-        height: int,
-        width: int,
-        num_heads: int,
-        num_actions: int,
-        hidden_dim: int,
+        fc_hidden_dim: int,
+        height: int = 15,
+        width: int = 15,
+        num_heads: int = 3,  # 3 units per agent
+        num_actions: int = NUM_ACTIONS,
     ) -> None:
         super().__init__()
         self._num_heads = num_heads
         self._num_actions = num_actions
 
         # 7 convolutional layers, so that each tile can "see" the entire map
-        self.trunk = nn.Sequential(
-            nn.Conv2d(conv_in_channels, conv_hidden_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(
-                conv_hidden_channels, conv_hidden_channels, kernel_size=3, padding=1
-            ),
-            nn.ReLU(),
-            nn.Conv2d(
-                conv_hidden_channels, conv_hidden_channels, kernel_size=3, padding=1
-            ),
-            nn.ReLU(),
-            nn.Conv2d(
-                conv_hidden_channels, conv_hidden_channels, kernel_size=3, padding=1
-            ),
-            nn.ReLU(),
-            nn.Conv2d(
-                conv_hidden_channels, conv_hidden_channels, kernel_size=3, padding=1
-            ),
-            nn.ReLU(),
-            nn.Conv2d(
-                conv_hidden_channels, conv_hidden_channels, kernel_size=3, padding=1
-            ),
-            nn.ReLU(),
-            nn.Conv2d(
-                conv_hidden_channels, conv_out_channels, kernel_size=3, padding=1
-            ),
-            nn.ReLU(),
+        self.conv_layers = (
+            [
+                nn.Conv2d(
+                    conv_in_channels, conv_hidden_channels, kernel_size=3, padding=1
+                )
+            ]
+            + [
+                nn.Conv2d(
+                    conv_hidden_channels, conv_hidden_channels, kernel_size=3, padding=1
+                )
+                for _ in range(5)
+            ]
+            + [
+                nn.Conv2d(
+                    conv_hidden_channels, conv_out_channels, kernel_size=3, padding=1
+                )
+            ]
         )
 
         conv_out_dim = conv_out_channels * height * width
         self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(conv_out_dim, hidden_dim),
+            nn.Linear(conv_out_dim, fc_hidden_dim),
             nn.ReLU(),
         )
 
         self.heads = nn.ModuleList(
-            [nn.Linear(hidden_dim, num_actions) for _ in range(num_heads)]
+            [nn.Linear(fc_hidden_dim, num_actions) for _ in range(num_heads)]
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        features = self.trunk(x)
-        features = self.fc(features)
+        identity = x
+        for conv in self.conv_layers:
+            x = nn.ReLU(conv(x)) + identity
+
+        features = self.fc(x)
         head_outputs = [head(features) for head in self.heads]
         return torch.stack(head_outputs, dim=1)
 
@@ -263,5 +256,3 @@ class DQNModel(nn.Module):
         self.load_state_dict(torch.load(path, map_location="cpu"))
 
 
-ACTION_ORDER = ActionType.ordered()
-NUM_ACTIONS = len(ACTION_ORDER)
