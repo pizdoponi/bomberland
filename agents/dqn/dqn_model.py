@@ -35,9 +35,9 @@ class ActionType(Enum):
         return [
             cls.NOOP,
             cls.UP,
+            cls.RIGHT,
             cls.DOWN,
             cls.LEFT,
-            cls.RIGHT,
             cls.PLACE_BOMB,
             cls.DETONATE_BOMB,
         ]
