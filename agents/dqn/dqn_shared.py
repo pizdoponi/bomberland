@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Deque, Dict, List, Tuple
+from typing import Deque, Dict, List
 
 import numpy as np
 from dqn_config import DQNConfig
@@ -91,60 +91,6 @@ class DQNFeatureBuilder:
             )
 
         return frame
-
-    def build_cache(self, game_state: TypedGameState) -> DQNCache:
-        blocked_positions = set()
-        team_bombs: List[Tuple[int, int]] = []
-        my_unit_ids = {unit.unit_id for unit in game_state.my_units}
-
-        for entity in game_state.entities:
-            if entity.is_solid():
-                blocked_positions.add((entity.x, entity.y))
-            if (
-                entity.entity_type == EntityType.BOMB
-                and entity.owner_unit_id in my_unit_ids
-            ):
-                team_bombs.append((entity.x, entity.y))
-
-        for unit in game_state.alive_units:
-            blocked_positions.add((unit.x, unit.y))
-
-        return DQNCache(blocked_positions=blocked_positions, team_bombs=team_bombs)
-
-    def legal_actions(
-        self,
-        game_state: TypedGameState,
-        unit_id: str,
-        cache: DQNCache,
-    ) -> List[int]:
-        unit = game_state.get_unit(unit_id)
-        if unit is None:
-            return [ActionType.NOOP.value]
-        x, y = unit.x, unit.y
-        width = game_state.world.width
-        height = game_state.world.height
-
-        legal = []
-        for action in [
-            ActionType.UP,
-            ActionType.RIGHT,
-            ActionType.DOWN,
-            ActionType.LEFT,
-        ]:
-            dx, dy = MOVE_DELTAS[action]
-            nx, ny = x + dx, y + dy
-            if self._is_walkable(nx, ny, width, height, cache.blocked_positions):
-                legal.append(action.value)
-
-        bombs = float(unit.inventory.bombs)
-        if bombs > 0:
-            legal.append(ActionType.PLACE_BOMB.value)
-
-        if cache.team_bombs:
-            legal.append(ActionType.DETONATE_BOMB.value)
-
-        legal.append(ActionType.NOOP.value)
-        return legal
 
     def unit_id_to_head_index(
         self, unit_id: str, sorted_units: List[str]
