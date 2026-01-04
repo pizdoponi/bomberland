@@ -282,7 +282,7 @@ class DQNTrainer:
             logger.debug(
                 f"Sending action packet {action_packet} from {action_type=} for unit {unit_id}"
             )
-        await self.agent_client._send(action_packet)
+        await self.agent_client._send(action_packet.to_dict())
 
     async def _on_endgame(self, *args, **kwargs) -> None:
         logger.info("Endgame received, resetting trainer state")
