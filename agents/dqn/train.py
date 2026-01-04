@@ -258,6 +258,13 @@ class DQNTrainer:
         if action_type == ActionType.NOOP:
             return
         action_packet = action_type.to_action_packet(unit_id, game_state)
+        if isinstance(action_packet, SkipAction):
+            logger.debug(f"Skipping action for unit {unit_id}, because {action_type=}")
+            return
+        else:
+            logger.debug(
+                f"Sending action packet {action_packet} from {action_type=} for unit {unit_id}"
+            )
         await self.agent_client._send(action_packet)
 
     async def _on_endgame(self) -> None:

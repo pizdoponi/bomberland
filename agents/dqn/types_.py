@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
@@ -11,6 +12,9 @@ from typing import (
     Optional,
     Union,
 )
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # mines
 
@@ -44,35 +48,41 @@ class ActionType(Enum):
     def from_index(cls, index: int) -> "ActionType":
         return cls(index)
 
-    def to_action_packet(self, unit_id: str, game_state: "GameState") -> ActionPacket:
-        bomb_0 = game_state.my_units_bombs(unit_id=unit_id, bomb_idx=0)[0]
-        bomb_1 = game_state.my_units_bombs(unit_id=unit_id, bomb_idx=1)[0]
-        bomb_2 = game_state.my_units_bombs(unit_id=unit_id, bomb_idx=2)[0]
+    def to_action_packet(self, unit_id: str, game_state: "GameState") -> "ActionPacket":
+        logger.debug(f"Mapping {self} to action packet for unit {unit_id}")
 
-        mapping = {
-            ActionType.NOOP: SkipAction(unit_id=unit_id),
-            ActionType.UP: MoveAction.from_direction(unit_id=unit_id, direction="up"),
-            ActionType.DOWN: MoveAction.from_direction(
-                unit_id=unit_id, direction="down"
-            ),
-            ActionType.LEFT: MoveAction.from_direction(
-                unit_id=unit_id, direction="left"
-            ),
-            ActionType.RIGHT: MoveAction.from_direction(
-                unit_id=unit_id, direction="right"
-            ),
-            ActionType.PLACE_BOMB: BombAction(unit_id=unit_id),
-            ActionType.DETONATE_BOMB_0: DetonateAction(
-                unit_id=unit_id, target=Point(bomb_0.x, bomb_0.y)
-            ),
-            ActionType.DETONATE_BOMB_1: DetonateAction(
-                unit_id=unit_id, target=Point(bomb_1.x, bomb_1.y)
-            ),
-            ActionType.DETONATE_BOMB_2: DetonateAction(
-                unit_id=unit_id, target=Point(bomb_2.x, bomb_2.y)
-            ),
-        }
-        return mapping[self]
+        if ActionType.NOOP:
+            return SkipAction(unit_id=unit_id)
+        elif ActionType.UP:
+            MoveAction.from_direction(unit_id=unit_id, direction="up")
+        elif ActionType.DOWN:
+            return MoveAction.from_direction(unit_id=unit_id, direction="down")
+        elif ActionType.LEFT:
+            return MoveAction.from_direction(unit_id=unit_id, direction="left")
+        elif ActionType.RIGHT:
+            return MoveAction.from_direction(unit_id=unit_id, direction="right")
+        elif ActionType.PLACE_BOMB:
+            return BombAction(unit_id=unit_id)
+        elif ActionType.DETONATE_BOMB_0:
+            maybe_bomb_0 = game_state.my_units_bombs(unit_id=unit_id, bomb_idx=0)
+            if not maybe_bomb_0:
+                return SkipAction(unit_id=unit_id)
+            bomb_0 = maybe_bomb_0[0]
+            return DetonateAction(unit_id=unit_id, target=Point(bomb_0.x, bomb_0.y))
+        elif ActionType.DETONATE_BOMB_1:
+            maybe_bomb_1 = game_state.my_units_bombs(unit_id=unit_id, bomb_idx=1)
+            if not maybe_bomb_1:
+                return SkipAction(unit_id=unit_id)
+            bomb_1 = maybe_bomb_1[0]
+            return DetonateAction(unit_id=unit_id, target=Point(bomb_1.x, bomb_1.y))
+        elif ActionType.DETONATE_BOMB_2:
+            maybe_bomb_2 = game_state.my_units_bombs(unit_id=unit_id, bomb_idx=2)
+            if not maybe_bomb_2:
+                return SkipAction(unit_id=unit_id)
+            bomb_2 = maybe_bomb_2[0]
+            return DetonateAction(unit_id=unit_id, target=Point(bomb_2.x, bomb_2.y))
+        else:
+            raise ValueError(f"Unknown ActionType: {self}")
 
 
 # ─────────────────────────────────────────────────────────────
