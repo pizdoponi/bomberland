@@ -599,6 +599,48 @@ class GameState:
 
     # ------------- Entity lookup helpers -------------
 
+    def my_units_bombs(
+        self, unit_id: Optional[str] = None, bomb_idx: Optional[int] = None
+    ) -> List[Entity]:
+        """Returns bombs placed by my units.
+
+        Args:
+            unit_id: If provided, only returns bombs placed by this unit.
+            bomb_idx: If provided, only returns the bomb at this index (0-based). Must be in range [0, 2],
+                corresponding to the first, second, or third bomb placed by the unit (based on game_tick).
+                Should only be used when `unit_id` is also provided.
+
+        Returns:
+            List of Entity objects corresponding to bombs placed by my units.
+            The list is empty if no such bombs exist (if requesting bomb at idx 2 for unit that only placed
+                one bomb, the return is also an empty list).
+        """
+        assert bomb_idx is None or bomb_idx in {0, 1, 2}, (
+            "bomb_idx must be one of {0, 1, 2} if provided"
+        )
+        assert not (unit_id is None and bomb_idx is not None), (
+            "bomb_idx can only be used when unit_id is provided"
+        )
+
+        my_unit_ids = (
+            {unit_id} if unit_id is not None else {u.unit_id for u in self.my_units}
+        )
+        my_units_bombs = [
+            e
+            for e in self.entities
+            if e.entity_type == EntityType.BOMB and e.owner_unit_id in my_unit_ids
+        ]
+
+        if bomb_idx is not None:
+            # Sort bombs by creation tick to determine order
+            my_units_bombs.sort(key=lambda b: b.created)
+            if my_units_bombs and len(my_units_bombs) > bomb_idx:
+                return [my_units_bombs[bomb_idx]]
+            else:
+                return []
+
+        return my_units_bombs
+
     def entities_of_type(self, entity_type: EntityType) -> List[Entity]:
         """Return all entities with the given EntityType."""
         return [e for e in self.entities if e.entity_type == entity_type]
