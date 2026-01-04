@@ -254,22 +254,12 @@ class DQNTrainer:
         return max(legal_actions, key=lambda idx: q_values[idx])
 
     async def _execute_action(
-        self, unit_id: str, action_type: ActionType, team_bombs: List[Tuple[int, int]]
+        self, unit_id: str, action_type: ActionType, game_state: TypedGameState
     ) -> None:
-        move = action_to_move(action_type)
-
-        if move is not None:
-            await self.agent_client.send_move(move, unit_id)
-        elif action_type == ActionType.PLACE_BOMB:
-            await self.agent_client.send_bomb(unit_id)
-        elif action_type == ActionType.DETONATE_BOMB:
-            if team_bombs:
-                x, y = team_bombs[0]
-                await self.agent_client.send_detonate(x, y, unit_id)
-        elif action_type == ActionType.NOOP:
+        if action_type == ActionType.NOOP:
             return
-        else:
-            logger.warning("Unhandled action %s for unit %s", action_type, unit_id)
+        action_packet = action_type.to_action_packet(unit_id, game_state)
+        await self.agent_client._send(action_packet)
 
     async def _on_endgame(self) -> None:
         self._feature_builder.reset_stack()

@@ -12,6 +12,69 @@ from typing import (
     Union,
 )
 
+# mines
+
+
+class ActionType(Enum):
+    NOOP = 0
+    UP = 1
+    RIGHT = 2
+    DOWN = 3
+    LEFT = 4
+    PLACE_BOMB = 5
+    DETONATE_BOMB_0 = 6
+    DETONATE_BOMB_1 = 7
+    DETONATE_BOMB_2 = 8
+
+    @classmethod
+    def ordered(cls) -> list["ActionType"]:
+        return [
+            cls.NOOP,
+            cls.UP,
+            cls.RIGHT,
+            cls.DOWN,
+            cls.LEFT,
+            cls.PLACE_BOMB,
+            cls.DETONATE_BOMB_0,
+            cls.DETONATE_BOMB_1,
+            cls.DETONATE_BOMB_2,
+        ]
+
+    @classmethod
+    def from_index(cls, index: int) -> "ActionType":
+        return cls(index)
+
+    def to_action_packet(self, unit_id: str, game_state: "GameState") -> ActionPacket:
+        bomb_0 = game_state.my_units_bombs(unit_id=unit_id, bomb_idx=0)[0]
+        bomb_1 = game_state.my_units_bombs(unit_id=unit_id, bomb_idx=1)[0]
+        bomb_2 = game_state.my_units_bombs(unit_id=unit_id, bomb_idx=2)[0]
+
+        mapping = {
+            ActionType.NOOP: SkipAction(unit_id=unit_id),
+            ActionType.UP: MoveAction.from_direction(unit_id=unit_id, direction="up"),
+            ActionType.DOWN: MoveAction.from_direction(
+                unit_id=unit_id, direction="down"
+            ),
+            ActionType.LEFT: MoveAction.from_direction(
+                unit_id=unit_id, direction="left"
+            ),
+            ActionType.RIGHT: MoveAction.from_direction(
+                unit_id=unit_id, direction="right"
+            ),
+            ActionType.PLACE_BOMB: BombAction(unit_id=unit_id),
+            ActionType.DETONATE_BOMB_0: DetonateAction(
+                unit_id=unit_id, target=Point(bomb_0.x, bomb_0.y)
+            ),
+            ActionType.DETONATE_BOMB_1: DetonateAction(
+                unit_id=unit_id, target=Point(bomb_1.x, bomb_1.y)
+            ),
+            ActionType.DETONATE_BOMB_2: DetonateAction(
+                unit_id=unit_id, target=Point(bomb_2.x, bomb_2.y)
+            ),
+        }
+        return mapping[self]
+
+
 # ─────────────────────────────────────────────────────────────
 # Basic enums & small helper types
 # ─────────────────────────────────────────────────────────────
