@@ -7,3 +7,10 @@ engine/bomberland-library/lib
 engine/bomberland-library/coverage
 
 agents/replay.json
+**/*.pt
+**/*.pth
+**/*.ckpt
+**/*.npz
+**/*.log
+logs/
+**/checkpoints/
