@@ -54,7 +54,7 @@ class ActionType(Enum):
         if self == ActionType.NOOP:
             return SkipAction(unit_id=unit_id)
         elif self == ActionType.UP:
-            MoveAction.from_direction(unit_id=unit_id, direction="up")
+            return MoveAction.from_direction(unit_id=unit_id, direction="up")
         elif self == ActionType.DOWN:
             return MoveAction.from_direction(unit_id=unit_id, direction="down")
         elif self == ActionType.LEFT:
