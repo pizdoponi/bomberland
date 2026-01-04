@@ -183,7 +183,7 @@ class DQNTrainer:
             )
             action_index = self._select_action(q_values[head_index], legal_actions)
             action_type = ActionType.from_index(action_index)
-            await self._execute_action(unit_id, action_type, cache.team_bombs)
+            await self._execute_action(unit_id, action_type, game_state)
 
             self._last_state[unit_id] = stacked_state
             self._last_action[unit_id] = action_type
