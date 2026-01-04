@@ -7,7 +7,7 @@ from dataclasses import dataclass
 class DQNConfig:
     epsilon_start: float = 1.0
     epsilon_min: float = 0.1
-    epsilon_decay: float = 0.999
+    epsilon_decay: float = 0.99999
     gamma: float = 0.99
     batch_size: int = 128
     replay_capacity: int = 20000
