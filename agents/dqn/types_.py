@@ -51,31 +51,31 @@ class ActionType(Enum):
     def to_action_packet(self, unit_id: str, game_state: "GameState") -> "ActionPacket":
         logger.debug(f"Mapping {self} to action packet for unit {unit_id}")
 
-        if ActionType.NOOP:
+        if self == ActionType.NOOP:
             return SkipAction(unit_id=unit_id)
-        elif ActionType.UP:
+        elif self == ActionType.UP:
             MoveAction.from_direction(unit_id=unit_id, direction="up")
-        elif ActionType.DOWN:
+        elif self == ActionType.DOWN:
             return MoveAction.from_direction(unit_id=unit_id, direction="down")
-        elif ActionType.LEFT:
+        elif self == ActionType.LEFT:
             return MoveAction.from_direction(unit_id=unit_id, direction="left")
-        elif ActionType.RIGHT:
+        elif self == ActionType.RIGHT:
             return MoveAction.from_direction(unit_id=unit_id, direction="right")
-        elif ActionType.PLACE_BOMB:
+        elif self == ActionType.PLACE_BOMB:
             return BombAction(unit_id=unit_id)
-        elif ActionType.DETONATE_BOMB_0:
+        elif self == ActionType.DETONATE_BOMB_0:
             maybe_bomb_0 = game_state.my_units_bombs(unit_id=unit_id, bomb_idx=0)
             if not maybe_bomb_0:
                 return SkipAction(unit_id=unit_id)
             bomb_0 = maybe_bomb_0[0]
             return DetonateAction(unit_id=unit_id, target=Point(bomb_0.x, bomb_0.y))
-        elif ActionType.DETONATE_BOMB_1:
+        elif self == ActionType.DETONATE_BOMB_1:
             maybe_bomb_1 = game_state.my_units_bombs(unit_id=unit_id, bomb_idx=1)
             if not maybe_bomb_1:
                 return SkipAction(unit_id=unit_id)
             bomb_1 = maybe_bomb_1[0]
             return DetonateAction(unit_id=unit_id, target=Point(bomb_1.x, bomb_1.y))
-        elif ActionType.DETONATE_BOMB_2:
+        elif self == ActionType.DETONATE_BOMB_2:
             maybe_bomb_2 = game_state.my_units_bombs(unit_id=unit_id, bomb_idx=2)
             if not maybe_bomb_2:
                 return SkipAction(unit_id=unit_id)
