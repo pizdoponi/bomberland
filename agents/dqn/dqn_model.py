@@ -4,76 +4,13 @@ import os
 import random
 from collections import deque
 from dataclasses import dataclass
-from enum import Enum
-from typing import Deque, NamedTuple, Optional
+from typing import Deque, NamedTuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from types_ import (
-    ActionPacket,
-    BombAction,
-    DetonateAction,
-    MoveAction,
-    Point,
-    SkipAction,
-)
-
-
-class ActionType(Enum):
-    NOOP = 0
-    UP = 1
-    RIGHT = 2
-    DOWN = 3
-    LEFT = 4
-    PLACE_BOMB = 5
-    DETONATE_BOMB = 6
-
-    @classmethod
-    def ordered(cls) -> list["ActionType"]:
-        return [
-            cls.NOOP,
-            cls.UP,
-            cls.RIGHT,
-            cls.DOWN,
-            cls.LEFT,
-            cls.PLACE_BOMB,
-            cls.DETONATE_BOMB,
-        ]
-
-    @classmethod
-    def from_index(cls, index: int) -> "ActionType":
-        return cls(index)
-
-    def to_action_packet(
-        self, unit_id: str, bomb_position: Optional[Point] = None
-    ) -> ActionPacket:
-        if self in {ActionType.DETONATE_BOMB}:
-            assert bomb_position is not None, (
-                "bomb_position must be provided for DETONATE_BOMB action"
-            )
-
-        mapping = {
-            ActionType.NOOP: SkipAction(unit_id=unit_id),
-            ActionType.UP: MoveAction.from_direction(unit_id=unit_id, direction="up"),
-            ActionType.DOWN: MoveAction.from_direction(
-                unit_id=unit_id, direction="down"
-            ),
-            ActionType.LEFT: MoveAction.from_direction(
-                unit_id=unit_id, direction="left"
-            ),
-            ActionType.RIGHT: MoveAction.from_direction(
-                unit_id=unit_id, direction="right"
-            ),
-            ActionType.PLACE_BOMB: BombAction(unit_id=unit_id),
-            ActionType.DETONATE_BOMB: DetonateAction(
-                unit_id=unit_id,
-                target=bomb_position,  # pyright: ignore[reportArgumentType]
-            ),
-        }
-        return mapping[self]
-
+from types_ import ActionType
 
 ACTION_ORDER = ActionType.ordered()
 NUM_ACTIONS = len(ACTION_ORDER)
