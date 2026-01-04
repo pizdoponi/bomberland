@@ -3,16 +3,17 @@ import logging
 import os
 import random
 import time
-from typing import Dict, List, Tuple
+from typing import Dict
 
 import numpy as np
 import torch
 from dqn_config import DQNConfig
 from dqn_model import NUM_ACTIONS, ActionType, DQNModel, ReplayBuffer
-from dqn_shared import DQNFeatureBuilder, action_to_move
+from dqn_shared import DQNFeatureBuilder
 from game_state import GameState
 from torch.optim.adamw import AdamW
 from types_ import GameState as TypedGameState
+from types_ import SkipAction
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,7 +49,9 @@ class DQNTrainer:
         self._first_tick_event = asyncio.Event()
 
     async def run(self):
+        logger.info(f"Connection agent to game engine at {agent_uri}")
         agent_connection = await self.agent_client.connect()
+        logger.info(f"Connection admin to game engine at {admin_uri}")
         admin_connection = await self.admin_client.connect()
 
         self.agent_client.set_game_tick_callback(self._on_game_tick)
@@ -62,10 +65,12 @@ class DQNTrainer:
         )
 
         kickoff_task = asyncio.create_task(self._ensure_first_tick())
+        logger.info("Creating admin, agent, and kickoff tasks")
         await asyncio.gather(admin_task, agent_task, kickoff_task)
 
     async def _on_game_tick(self, tick_number: int, game_state_: Dict):
         if not self._first_tick_event.is_set():
+            logger.info(f"First game tick received ({tick_number=}), starting training")
             self._first_tick_event.set()
 
         self._step_count += 1
@@ -105,6 +110,10 @@ class DQNTrainer:
                 self._model.load(self.config.load_path)
                 self._target_model.load_state_dict(self._model.state_dict())
                 logger.info("Loaded checkpoint from %s", self.config.load_path)
+            else:
+                logger.info(
+                    f"No checkpoint found at {self.config.load_path}, training from scratch"
+                )
 
         frame = self._feature_builder.encode_frame(game_state)
         stacked_state = self._feature_builder.update_frame_stack(frame)
@@ -154,6 +163,7 @@ class DQNTrainer:
             head_index = self._feature_builder.unit_id_to_head_index(
                 unit_id, my_units_sorted
             )
+            logger.debug(f"{unit_id=}, {head_index=}")
             if head_index is None:
                 continue
 
@@ -177,10 +187,7 @@ class DQNTrainer:
                     done,
                 )
 
-            legal_actions = self._feature_builder.legal_actions(
-                game_state, unit_id, cache
-            )
-            action_index = self._select_action(q_values[head_index], legal_actions)
+            action_index = self._select_action(q_values[head_index])
             action_type = ActionType.from_index(action_index)
             await self._execute_action(unit_id, action_type, game_state)
 
@@ -191,15 +198,24 @@ class DQNTrainer:
         self._train_step()
 
         if self._step_count % self.config.target_update_interval == 0:
+            logger.info(f"Updating target network at step {self._step_count}")
             self._target_model.load_state_dict(self._model.state_dict())
         if self._step_count % self.config.save_interval == 0:
+            logger.info(
+                f"Saving model checkpoint at step {self._step_count} to {self.config.checkpoint_path}"
+            )
             self._model.save(self.config.checkpoint_path)
 
+        # update epsilon
         if self.config.epsilon_start > self.config.epsilon_min:
-            self.config.epsilon_start = max(
+            new_epsilon = max(
                 self.config.epsilon_min,
                 self.config.epsilon_start * self.config.epsilon_decay,
             )
+            logger.debug(
+                f"Updating epsilon from {self.config.epsilon_start} to {new_epsilon}"
+            )
+            self.config.epsilon_start = new_epsilon
 
         await self.admin_client.send_request_tick()
 
@@ -213,18 +229,22 @@ class DQNTrainer:
         next_states = (
             torch.from_numpy(sample.next_states).float().to(self.config.device)
         )
-        head_idx = torch.from_numpy(sample.head_indices).long().to(self.config.device)
+        head_indices = (
+            torch.from_numpy(sample.head_indices).long().to(self.config.device)
+        )
         actions = torch.from_numpy(sample.actions).long().to(self.config.device)
         rewards = torch.from_numpy(sample.rewards).float().to(self.config.device)
         dones = torch.from_numpy(sample.dones).float().to(self.config.device)
 
         q_values = self._model(states)
-        q_selected = q_values[torch.arange(self.config.batch_size), head_idx, actions]
+        q_selected = q_values[
+            torch.arange(self.config.batch_size), head_indices, actions
+        ]
 
         with torch.no_grad():
             q_next = self._target_model(next_states)
             max_q_next = torch.max(q_next, dim=2).values
-            max_q = max_q_next[torch.arange(self.config.batch_size), head_idx]
+            max_q = max_q_next[torch.arange(self.config.batch_size), head_indices]
             targets = rewards + (1.0 - dones) * self.config.gamma * max_q
 
         loss = torch.mean((q_selected - targets) ** 2)
@@ -241,22 +261,19 @@ class DQNTrainer:
                 self.config.epsilon_start,
             )
 
-    def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
-        if not legal_actions:
-            logger.warning("No legal actions available, defaulting to NOOP")
-            return ActionType.NOOP.value
-        if random.random() < self.config.epsilon_start:
+    def _select_action(self, q_values: np.ndarray) -> int:
+        if (p := random.random()) < self.config.epsilon_start:
             logger.debug(
-                "Selecting random action due to epsilon %.3f", self.config.epsilon_start
+                f"Selecting random action due to {p=} < epsilon={self.config.epsilon_start:.3f}",
             )
-            return random.choice(legal_actions)
-        return max(legal_actions, key=lambda idx: q_values[idx])
+            return random.choice(list(range(NUM_ACTIONS)))
+        logger.debug("Selecting greedy action")
+        return max(list(range(NUM_ACTIONS)), key=lambda idx: q_values[idx])
 
     async def _execute_action(
         self, unit_id: str, action_type: ActionType, game_state: TypedGameState
     ) -> None:
-        if action_type == ActionType.NOOP:
-            return
+        logger.debug(f"Executing action {action_type} for unit {unit_id}")
         action_packet = action_type.to_action_packet(unit_id, game_state)
         if isinstance(action_packet, SkipAction):
             logger.debug(f"Skipping action for unit {unit_id}, because {action_type=}")
@@ -267,12 +284,15 @@ class DQNTrainer:
             )
         await self.agent_client._send(action_packet)
 
-    async def _on_endgame(self) -> None:
+    async def _on_endgame(self, *args, **kwargs) -> None:
+        logger.info("Endgame received, resetting trainer state")
+        logger.info(f"{args=}, {kwargs=}")
         self._feature_builder.reset_stack()
         self._last_state.clear()
         self._last_action.clear()
         self._last_metrics.clear()
         world_seed = random.randint(0, 2**31 - 1)
+        logger.info(f"Starting new game with world seed {world_seed}")
         await self.admin_client.send_request_game_reset(world_seed=world_seed)
         # reset _first_tick_event to wait for the next game start
         self._first_tick_event.clear()
@@ -281,7 +301,7 @@ class DQNTrainer:
         # Initial request_tick can be ignored if the game hasn't started yet.
         while not self._first_tick_event.is_set():
             await self.admin_client.send_request_tick()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
 
 
 def main() -> None:
