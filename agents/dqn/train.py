@@ -109,7 +109,6 @@ class DQNTrainer:
         frame = self._feature_builder.encode_frame(game_state)
         stacked_state = self._feature_builder.update_frame_stack(frame)
 
-        cache = self._feature_builder.build_cache(game_state)
         num_enemy_units_alive = len(game_state.enemy_alive_units) > 0
 
         for unit_id in list(self._last_state.keys()):

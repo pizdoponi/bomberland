@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
 from typing import Deque, Dict, List, Tuple
 
 import numpy as np
@@ -23,16 +22,6 @@ MOVE_BY_ACTION = {
     ActionType.DOWN: "down",
     ActionType.LEFT: "left",
 }
-
-
-def action_to_move(action_type: ActionType) -> str | None:
-    return MOVE_BY_ACTION.get(action_type)
-
-
-@dataclass
-class DQNCache:
-    blocked_positions: set
-    team_bombs: List[Tuple[int, int]]
 
 
 class DQNFeatureBuilder:
