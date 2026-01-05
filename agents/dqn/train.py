@@ -3,7 +3,7 @@ import logging
 import os
 import random
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -18,13 +18,16 @@ from types_ import SkipAction
 
 load_dotenv()
 
-TRAINING_MODE_ENABLED = str(os.environ.get("DQN_TRAINING_MODE", "0")) == "1"
 
 logging.basicConfig(
     level=logging.INFO,
     format="[dqn-train] %(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+TRAINING_MODE_ENABLED = str(os.environ.get("TRAINING_MODE_ENABLED", "0")) == "1"
+logger.info(f"{TRAINING_MODE_ENABLED=}")
 
 agent_uri = (
     os.environ.get("GAME_CONNECTION_STRING")
@@ -191,7 +194,10 @@ class DQNTrainer:
             if head_index is None:
                 continue
 
-            action_index = self._select_action(q_values[head_index])
+            legal_action_types = game_state.legal_actions(unit_state)
+            legal_actions = [action.value for action in legal_action_types]
+
+            action_index = self._select_action(q_values[head_index], legal_actions)
             action_type = ActionType.from_index(action_index)
 
             if TRAINING_MODE_ENABLED and not is_episode_done:
@@ -239,6 +245,9 @@ class DQNTrainer:
             # not warmed up yet
             or len(self._replay_buffer) < self.config.warmup_steps
         ):
+            logger.debug(
+                f"Skipping training step; len(replay_buffer)={len(self._replay_buffer)}, batch_size={self.config.batch_size}, warmup_steps={self.config.warmup_steps}"
+            )
             return
 
         sample = self._replay_buffer.sample(self.config.batch_size)
@@ -273,20 +282,22 @@ class DQNTrainer:
 
         if self._step_count % 100 == 0:
             logger.info(
-                "Training step %s, loss %.4f, epsilon %.3f",
-                self._step_count,
-                loss.item(),
-                self.config.epsilon_start,
+                f"Step={self._step_count}, loss={loss}, epsilon={self.config.epsilon_start:.3f}",
             )
 
-    def _select_action(self, q_values: np.ndarray) -> int:
+    def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
+        """Select action using epsilon-greedy with legal action masking."""
+        if not legal_actions:
+            logger.warning("No legal actions available, defaulting to NOOP")
+            return ActionType.NOOP.value
+
         if (p := random.random()) < self.config.epsilon_start:
             logger.debug(
-                f"Selecting random action due to {p=} < epsilon={self.config.epsilon_start:.3f}",
+                f"Selecting random legal action due to {p=} < epsilon={self.config.epsilon_start:.3f} from {legal_actions=}",
             )
-            return random.choice(list(range(NUM_ACTIONS)))
-        logger.debug("Selecting greedy action")
-        return max(list(range(NUM_ACTIONS)), key=lambda idx: q_values[idx])
+            return random.choice(legal_actions)
+        logger.debug(f"Selecting greedy action from {legal_actions=}")
+        return max(legal_actions, key=lambda idx: q_values[idx])
 
     async def _execute_action(
         self, unit_id: str, action_type: ActionType, game_state: TypedGameState
@@ -301,7 +312,9 @@ class DQNTrainer:
         await self.agent_client._send(action_packet.to_dict())
 
     async def _on_endgame(self, *args, **kwargs) -> None:
-        logger.info("Endgame received, resetting trainer state")
+        logger.info(
+            f"Step={self._step_count}, Endgame received, resetting trainer state. Game lasted for {self._prev_game_state.tick if self._prev_game_state else 0} ticks."
+        )
         logger.info(f"{args=}, {kwargs=}")
         self._feature_builder.reset_stack()
         self._last_state.clear()
