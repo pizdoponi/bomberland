@@ -739,7 +739,7 @@ class GameState:
         }.items():
             new_x = unit.x + dx
             new_y = unit.y + dy
-            if self.is_walkable(new_x, new_y, ignore_units=True):
+            if self.is_walkable(new_x, new_y, ignore_units=False):
                 actions.append(direction)
 
         # Bomb placement
