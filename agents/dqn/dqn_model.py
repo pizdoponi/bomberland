@@ -23,6 +23,7 @@ class Transition:
     action: ActionType
     reward: float
     next_state: np.ndarray
+    next_legal_actions_mask: np.ndarray
     done: float
 
 
@@ -32,6 +33,7 @@ class ReplayBufferSample(NamedTuple):
     actions: np.ndarray
     rewards: np.ndarray
     next_states: np.ndarray
+    next_legal_actions_mask: np.ndarray
     dones: np.ndarray
 
 
@@ -46,6 +48,7 @@ class ReplayBuffer:
         action: ActionType,
         reward: float,
         next_state: np.ndarray,
+        next_legal_actions_mask: np.ndarray,
         done: float,
     ) -> None:
         self._buffer.append(
@@ -55,6 +58,7 @@ class ReplayBuffer:
                 action=action,
                 reward=reward,
                 next_state=next_state,
+                next_legal_actions_mask=next_legal_actions_mask,
                 done=done,
             )
         )
@@ -66,9 +70,18 @@ class ReplayBuffer:
         actions = np.array([t.action.value for t in batch], dtype=np.int64)
         rewards = np.array([t.reward for t in batch], dtype=np.float32)
         next_states = np.stack([t.next_state for t in batch])
+        next_legal_actions_mask = np.stack(
+            [t.next_legal_actions_mask for t in batch]
+        ).astype(np.float32)
         dones = np.array([t.done for t in batch], dtype=np.float32)
         return ReplayBufferSample(
-            states, head_indices, actions, rewards, next_states, dones
+            states,
+            head_indices,
+            actions,
+            rewards,
+            next_states,
+            next_legal_actions_mask,
+            dones,
         )
 
     def __len__(self) -> int:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Deque, Dict, List
+from typing import Deque, List
 
 import numpy as np
 from dqn_config import DQNConfig
@@ -102,13 +102,6 @@ class DQNFeatureBuilder:
             return None
         return idx
 
-    def extract_metrics(
-        self, game_state: TypedGameState, unit_id: str, enemy_units: List
-    ) -> Dict[str, float]:
-        unit = game_state.get_unit(unit_id)
-        hp = float(unit.hp) if unit else 0.0
-        enemy_hp = float(sum(enemy.hp for enemy in enemy_units))
-        return {"hp": hp, "enemy_hp": enemy_hp}
 
     def compute_team_and_unit_rewards(
         self,

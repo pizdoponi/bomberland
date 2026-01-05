@@ -49,8 +49,6 @@ class ActionType(Enum):
         return cls(index)
 
     def to_action_packet(self, unit_id: str, game_state: "GameState") -> "ActionPacket":
-        logger.debug(f"Mapping {self} to action packet for unit {unit_id}")
-
         if self == ActionType.NOOP:
             return SkipAction(unit_id=unit_id)
         elif self == ActionType.UP:

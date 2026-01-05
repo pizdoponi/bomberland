@@ -35,13 +35,16 @@ agent_uri = (
 )
 admin_uri = "ws://game-engine:3000/?role=admin"
 
+logger.info(f"{admin_uri=}")
+logger.info(f"{agent_uri=}")
+
 
 class DQNTrainer:
     def __init__(self) -> None:
         self.admin_client = GameState(admin_uri)
         self.agent_client = GameState(agent_uri)
 
-        self.config = DQNConfig(epsilon_decay=0.9999, learning_rate=0.0001)
+        self.config = DQNConfig(epsilon_decay=0.99999, learning_rate=0.0001)
         logger.info(f"config={self.config}")
 
         self._feature_builder = DQNFeatureBuilder(self.config)
@@ -57,6 +60,8 @@ class DQNTrainer:
 
         self._step_count = 0
         self._first_tick_event = asyncio.Event()
+
+        self._games_played = 0
 
     async def run(self):
         logger.info(f"Connection agent to game engine at {agent_uri}")
@@ -79,8 +84,14 @@ class DQNTrainer:
         await asyncio.gather(admin_task, agent_task, kickoff_task)
 
     async def _on_game_tick(self, tick_number: int, game_state_: Dict):
+        logger.debug(f"Step={self._step_count}, {tick_number=}")
         if not self._first_tick_event.is_set():
-            logger.info(f"First game tick received ({tick_number=}), starting training")
+            logger.info(
+                f"--------------------- Game {self._games_played + 1} ----------------------"
+            )
+            logger.debug(
+                f"First tick ({tick_number=}) received for game {self._games_played + 1}, setting first_tick_event"
+            )
             self._first_tick_event.set()
 
         self._step_count += 1
@@ -88,6 +99,7 @@ class DQNTrainer:
         game_state = TypedGameState.from_dict(game_state_)
 
         my_units_sorted = sorted([unit.unit_id for unit in game_state.my_units])
+        logger.debug(f"{my_units_sorted=}")
 
         if self._model is None:
             in_channels = (
@@ -128,11 +140,18 @@ class DQNTrainer:
         frame = self._feature_builder.encode_frame(game_state)
         stacked_state = self._feature_builder.update_frame_stack(frame)
 
+        logger.debug(
+            f"frame.shape={frame.shape}, stacked_state.shape={stacked_state.shape}"
+        )
+
         if self._prev_game_state is not None:
             team_reward, units_reward, is_episode_done = (
                 self._feature_builder.compute_team_and_unit_rewards(
                     self._prev_game_state, game_state
                 )
+            )
+            logger.debug(
+                f"Computed rewards: {team_reward=}, {units_reward=}, {is_episode_done=}"
             )
             if self._step_count % 20 == 0:
                 logger.info(
@@ -159,13 +178,27 @@ class DQNTrainer:
                         f"Last action for unit {unit_id} missing, skipping transition storage"
                     )
                     continue
+                logger.debug(f"{unit_id=}, {last_action=}")
 
                 reward = units_reward.get(unit_id, team_reward)
 
                 if reward == team_reward:
-                    logger.warning(
-                        f"Unit {unit_id} has no individual reward, using team reward {team_reward}"
+                    my_alive_units = {unit.unit_id for unit in game_state.my_alive_units}
+                    is_unit_alive = (
+                        game_state.get_unit(unit_id) is not None
+                        and game_state.get_unit(unit_id) in my_alive_units
                     )
+                    logger.warning(
+                        f"Unit {unit_id} has no individual reward, using team reward {team_reward}. Unit is alive: {is_unit_alive}."
+                    )
+                logger.debug(f"{unit_id=}, {reward=}")
+
+                next_unit_state = game_state.get_unit(unit_id)
+                legal_actions_mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
+                legal_actions_mask[ActionType.NOOP.value] = 1.0  # always allow NOOP
+                if next_unit_state is not None and next_unit_state.is_alive():
+                    for action in game_state.legal_actions(next_unit_state):
+                        legal_actions_mask[action.value] = 1.0
 
                 self._replay_buffer.add(
                     last_state,
@@ -173,6 +206,7 @@ class DQNTrainer:
                     self._last_action[unit_id],
                     reward,
                     stacked_state,
+                    legal_actions_mask,
                     1.0 if is_episode_done else 0.0,
                 )
 
@@ -261,6 +295,11 @@ class DQNTrainer:
         )
         actions = torch.from_numpy(sample.actions).long().to(self.config.device)
         rewards = torch.from_numpy(sample.rewards).float().to(self.config.device)
+        next_legal_actions_mask = (
+            torch.from_numpy(sample.next_legal_actions_mask)
+            .float()
+            .to(self.config.device)
+        )
         dones = torch.from_numpy(sample.dones).float().to(self.config.device)
 
         q_values = self._model(states)
@@ -270,8 +309,10 @@ class DQNTrainer:
 
         with torch.no_grad():
             q_next = self._target_model(next_states)
-            max_q_next = torch.max(q_next, dim=2).values
-            max_q = max_q_next[torch.arange(self.config.batch_size), head_indices]
+            # Gather the head for the relevant unit, then mask illegal actions
+            q_next_head = q_next[torch.arange(self.config.batch_size), head_indices]
+            masked_q_next = q_next_head.masked_fill(next_legal_actions_mask == 0, -1e9)
+            max_q = torch.max(masked_q_next, dim=1).values
             targets = rewards + (1.0 - dones) * self.config.gamma * max_q
 
         loss = torch.mean((q_selected - targets) ** 2)
@@ -312,6 +353,8 @@ class DQNTrainer:
         await self.agent_client._send(action_packet.to_dict())
 
     async def _on_endgame(self, *args, **kwargs) -> None:
+        self._games_played += 1
+        logger.info(f"games_played={self._games_played}")
         logger.info(
             f"Step={self._step_count}, Endgame received, resetting trainer state. Game lasted for {self._prev_game_state.tick if self._prev_game_state else 0} ticks."
         )
