@@ -747,11 +747,11 @@ class GameState:
             actions.append(ActionType.PLACE_BOMB)
 
         # Bomb detonations
-        if len(my_bombs) >= 1:
+        if len(my_bombs) >= 1 and my_bombs[0].is_armed(self.tick):
             actions.append(ActionType.DETONATE_BOMB_0)
-        if len(my_bombs) >= 2:
+        if len(my_bombs) >= 2 and my_bombs[1].is_armed(self.tick):
             actions.append(ActionType.DETONATE_BOMB_1)
-        if len(my_bombs) >= 3:
+        if len(my_bombs) >= 3 and my_bombs[2].is_armed(self.tick):
             actions.append(ActionType.DETONATE_BOMB_2)
 
         return actions
