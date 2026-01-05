@@ -422,6 +422,10 @@ class Entity:
             EntityType.BLAST,  # includes end-game fire
         }
 
+    def is_armed(self, tick: int) -> bool:
+        """Return True if this entity is a bomb that is armed (was created >= 5 ticks ago)."""
+        return self.entity_type == EntityType.BOMB and (tick - self.created) >= 5
+
     def blast_diameter_(self, unit: Optional[UnitState] = None) -> int:
         """Return the blast diameter if this entity is a bomb.
 
