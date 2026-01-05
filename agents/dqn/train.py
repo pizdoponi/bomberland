@@ -221,7 +221,12 @@ class DQNTrainer:
         await self.admin_client.send_request_tick()
 
     def _train_step(self) -> None:
-        if len(self._replay_buffer) < self.config.batch_size:
+        if (
+            # not enough samples in replay buffer
+            len(self._replay_buffer) < self.config.batch_size
+            # not warmed up yet
+            or len(self._replay_buffer) < self.config.warmup_steps
+        ):
             return
 
         sample = self._replay_buffer.sample(self.config.batch_size)

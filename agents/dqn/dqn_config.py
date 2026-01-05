@@ -11,6 +11,7 @@ class DQNConfig:
     gamma: float = 0.99
     batch_size: int = 128
     replay_capacity: int = 20000
+    warmup_steps: int = 5000
     learning_rate: float = 0.00005
     fc_hidden_dim: int = 128
     conv_hidden_channels: int = 64
