@@ -728,6 +728,9 @@ class GameState:
     def legal_actions(self, unit: UnitState) -> List[ActionType]:
         """Return a list of legal ActionType values for the given unit."""
         actions = [ActionType.NOOP]
+        
+        if unit.is_stunned(self.tick):
+            return [ActionType.NOOP] # If stunned, only NOOP is legal
 
         # Movement
         for direction, (dx, dy) in {
