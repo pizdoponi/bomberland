@@ -110,26 +110,101 @@ class DQNFeatureBuilder:
         enemy_hp = float(sum(enemy.hp for enemy in enemy_units))
         return {"hp": hp, "enemy_hp": enemy_hp}
 
-    def compute_reward(
+    def compute_team_and_unit_rewards(
         self,
-        prev_metrics: Dict[str, float],
-        curr_metrics: Dict[str, float],
-        unit_alive: bool,
-        enemy_alive: bool,
-    ) -> float:
-        prev_hp = prev_metrics.get("hp", curr_metrics.get("hp", 0.0))
-        curr_hp = curr_metrics.get("hp", 0.0)
-        prev_enemy_hp = prev_metrics.get("enemy_hp", curr_metrics.get("enemy_hp", 0.0))
-        curr_enemy_hp = curr_metrics.get("enemy_hp", 0.0)
+        prev_game_state: TypedGameState,
+        curr_game_state: TypedGameState,
+    ) -> tuple[float, dict[str, float], bool]:
+        """
+        Returns:
+            team_reward: shared objective reward
+            unit_rewards: per-unit reward = team_reward + small PBRS-like shaping
+            done: terminal flag (enemy dead or me dead)
+        """
 
-        reward = 0.0
-        reward += (prev_enemy_hp - curr_enemy_hp) * 5.0
-        reward += (curr_hp - prev_hp) * 2.0
-        if not unit_alive and prev_hp > 0:
-            reward -= 10.0
-        if not enemy_alive and prev_enemy_hp > 0:
-            reward += 10.0
-        return reward
+        # ---------- Terminal ----------
+        prev_enemy_alive = len(prev_game_state.enemy_alive_units)
+        prev_my_alive = len(prev_game_state.my_alive_units)
+        curr_enemy_alive = len(curr_game_state.enemy_alive_units)
+        curr_my_alive = len(curr_game_state.my_alive_units)
+
+        done = (curr_enemy_alive == 0) or (curr_my_alive == 0)
+
+        terminal = 0.0
+        if curr_enemy_alive == 0 and curr_my_alive > 0:
+            terminal = 1.0
+        elif curr_my_alive == 0 and curr_enemy_alive > 0:
+            terminal = -1.0
+        elif curr_my_alive == 0 and curr_enemy_alive == 0:
+            terminal = 0.0
+
+        # ---------- Dense objective: HP swing + death swing ----------
+        prev_my_hp = sum(u.hp for u in prev_game_state.my_units)
+        curr_my_hp = sum(u.hp for u in curr_game_state.my_units)
+        prev_enemy_hp = sum(u.hp for u in prev_game_state.enemy_units)
+        curr_enemy_hp = sum(u.hp for u in curr_game_state.enemy_units)
+
+        enemy_hp_lost = max(0, prev_enemy_hp - curr_enemy_hp)
+        my_hp_lost = max(0, prev_my_hp - curr_my_hp)
+
+        enemy_deaths = max(0, prev_enemy_alive - curr_enemy_alive)
+        my_deaths = max(0, prev_my_alive - curr_my_alive)
+
+        # Scale to keep values stable
+        hp_term = 0.10 * ((enemy_hp_lost - my_hp_lost) / 9.0)  # 9 = 3 units * 3 HP
+        death_term = 0.30 * ((enemy_deaths - my_deaths) / 3.0)  # 3 units per agent
+
+        step_penalty = 0.0 if done else -0.001
+
+        team_reward = terminal + hp_term + death_term + step_penalty
+
+        # ---------- Per-unit shaping (small): safety + enemy proximity ----------
+        # This is intentionally simple (no full blast simulation).
+        def danger_score(gs: TypedGameState, unit) -> float:
+            # Standing on blast is worst
+            if gs.is_dangerous_tile(unit.x, unit.y):
+                # bomb OR blast present
+                return 1.0
+
+            # If you're near a blast tile, also bad
+            blasts = gs.entities_of_type(EntityType.BLAST)
+            if blasts:
+                dmin = min(abs(unit.x - b.x) + abs(unit.y - b.y) for b in blasts)
+                if dmin == 1:
+                    return 0.7
+                if dmin == 2:
+                    return 0.3
+            return 0.0
+
+        def enemy_proximity(gs: TypedGameState, unit) -> float:
+            enemies = [e for e in gs.enemy_units if e.is_alive()]
+            if not enemies:
+                return 1.0
+            dmin = min(unit.position.distance_to(e.position) for e in enemies)
+            return 1.0 / (1.0 + float(dmin))
+
+        # Potential: higher is better
+        def potential(gs: TypedGameState, unit) -> float:
+            if not unit.is_alive():
+                return 0.0
+            safe = 1.0 - danger_score(gs, unit)
+            press = enemy_proximity(gs, unit)
+            return 0.65 * safe + 0.35 * press
+
+        unit_rewards: dict[str, float] = {}
+        gamma = self.config.gamma
+        shaping_weight = 0.05
+
+        for u in curr_game_state.my_units:
+            if not u.is_alive():
+                continue
+            # PBRS-style: gamma*Phi(s') - Phi(s)
+            phi_prev = potential(prev_game_state, prev_game_state.get_unit(u.unit_id) or u)
+            phi_curr = potential(curr_game_state, u)
+            shaping = gamma * phi_curr - phi_prev
+            unit_rewards[u.unit_id] = team_reward + shaping_weight * shaping
+
+        return team_reward, unit_rewards, done
 
     def _is_walkable(
         self, x: int, y: int, width: int, height: int, blocked_positions: set
