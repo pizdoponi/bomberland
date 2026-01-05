@@ -33,7 +33,8 @@ class DQNTrainer:
         self.admin_client = GameState(admin_uri)
         self.agent_client = GameState(agent_uri)
 
-        self.config = DQNConfig()
+        self.config = DQNConfig(epsilon_decay=0.9999, learning_rate=0.0001)
+        logger.info(f"config={self.config}")
 
         self._feature_builder = DQNFeatureBuilder(self.config)
 

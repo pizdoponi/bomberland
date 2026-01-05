@@ -84,6 +84,13 @@ class ActionType(Enum):
         else:
             raise ValueError(f"Unknown ActionType: {self}")
 
+    def is_bomb_detonation(self) -> bool:
+        return self in {
+            ActionType.DETONATE_BOMB_0,
+            ActionType.DETONATE_BOMB_1,
+            ActionType.DETONATE_BOMB_2,
+        }
+
 
 # ─────────────────────────────────────────────────────────────
 # Basic enums & small helper types
