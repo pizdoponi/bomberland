@@ -3,10 +3,11 @@ import logging
 import os
 import random
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 import torch
+from dotenv import load_dotenv
 from dqn_config import DQNConfig
 from dqn_model import NUM_ACTIONS, ActionType, DQNModel, ReplayBuffer
 from dqn_shared import DQNFeatureBuilder
@@ -14,6 +15,10 @@ from game_state import GameState
 from torch.optim.adamw import AdamW
 from types_ import GameState as TypedGameState
 from types_ import SkipAction
+
+load_dotenv()
+
+TRAINING_MODE_ENABLED = str(os.environ.get("DQN_TRAINING_MODE", "0")) == "1"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,7 +50,8 @@ class DQNTrainer:
 
         self._last_state: Dict[str, np.ndarray] = {}
         self._last_action: Dict[str, ActionType] = {}
-        self._last_metrics: Dict[str, Dict[str, float]] = {}
+        self._prev_game_state: Optional[TypedGameState] = None
+
         self._step_count = 0
         self._first_tick_event = asyncio.Event()
 
@@ -119,36 +125,53 @@ class DQNTrainer:
         frame = self._feature_builder.encode_frame(game_state)
         stacked_state = self._feature_builder.update_frame_stack(frame)
 
-        num_enemy_units_alive = len(game_state.enemy_alive_units) > 0
+        if self._prev_game_state is not None:
+            team_reward, units_reward, is_episode_done = (
+                self._feature_builder.compute_team_and_unit_rewards(
+                    self._prev_game_state, game_state
+                )
+            )
+            if self._step_count % 20 == 0:
+                logger.info(
+                    f"Step={self._step_count}, {team_reward=}, {units_reward=}, {is_episode_done=}"
+                )
+        else:
+            team_reward, units_reward, is_episode_done = 0.0, {}, False
 
-        for unit_id in list(self._last_state.keys()):
-            unit_state = game_state.get_unit(unit_id)
-            unit_alive = unit_state.is_alive() if unit_state else False
-            if not unit_alive:
-                current_metrics = self._feature_builder.extract_metrics(
-                    game_state, unit_id, game_state.enemy_units
-                )
-                reward = self._feature_builder.compute_reward(
-                    self._last_metrics.get(unit_id, {}),
-                    current_metrics,
-                    False,
-                    num_enemy_units_alive,
-                )
+        if TRAINING_MODE_ENABLED and self._prev_game_state is not None:
+            for unit_id, last_state in list(self._last_state.items()):
                 head_index = self._feature_builder.unit_id_to_head_index(
                     unit_id, my_units_sorted
                 )
-                if head_index is not None:
-                    self._replay_buffer.add(
-                        self._last_state[unit_id],
-                        head_index,
-                        self._last_action[unit_id],
-                        reward,
-                        self._last_state[unit_id],
-                        1.0,
+                logger.debug(f"{unit_id=}, {head_index=}")
+                if head_index is None:
+                    logger.error(
+                        f"Head index for unit {unit_id} is None, skipping transition storage"
                     )
-                self._last_state.pop(unit_id, None)
-                self._last_action.pop(unit_id, None)
-                self._last_metrics.pop(unit_id, None)
+                    continue
+
+                last_action = self._last_action.get(unit_id)
+                if last_action is None:
+                    logger.error(
+                        f"Last action for unit {unit_id} missing, skipping transition storage"
+                    )
+                    continue
+
+                reward = units_reward.get(unit_id, team_reward)
+
+                if reward == team_reward:
+                    logger.warning(
+                        f"Unit {unit_id} has no individual reward, using team reward {team_reward}"
+                    )
+
+                self._replay_buffer.add(
+                    last_state,
+                    head_index,
+                    self._last_action[unit_id],
+                    reward,
+                    stacked_state,
+                    1.0 if is_episode_done else 0.0,
+                )
 
         state_tensor = (
             torch.from_numpy(stacked_state).float().unsqueeze(0).to(self.config.device)
@@ -168,55 +191,44 @@ class DQNTrainer:
             if head_index is None:
                 continue
 
-            metrics = self._feature_builder.extract_metrics(
-                game_state, unit_id, game_state.enemy_units
-            )
-            if unit_id in self._last_state:
-                reward = self._feature_builder.compute_reward(
-                    self._last_metrics.get(unit_id, {}),
-                    metrics,
-                    True,
-                    num_enemy_units_alive,
-                )
-                done = 1.0 if not num_enemy_units_alive else 0.0
-                self._replay_buffer.add(
-                    self._last_state[unit_id],
-                    head_index,
-                    self._last_action[unit_id],
-                    reward,
-                    stacked_state,
-                    done,
-                )
-
             action_index = self._select_action(q_values[head_index])
             action_type = ActionType.from_index(action_index)
+
+            if TRAINING_MODE_ENABLED and not is_episode_done:
+                self._last_state[unit_id] = stacked_state
+                self._last_action[unit_id] = action_type
+
             await self._execute_action(unit_id, action_type, game_state)
 
-            self._last_state[unit_id] = stacked_state
-            self._last_action[unit_id] = action_type
-            self._last_metrics[unit_id] = metrics
+        if TRAINING_MODE_ENABLED:
+            self._train_step()
 
-        self._train_step()
+            if self._step_count % self.config.target_update_interval == 0:
+                logger.debug(f"Updating target network at step {self._step_count}")
+                self._target_model.load_state_dict(self._model.state_dict())
+            if self._step_count % self.config.save_interval == 0:
+                logger.info(
+                    f"Saving model checkpoint at step {self._step_count} to {self.config.checkpoint_path}"
+                )
+                self._model.save(self.config.checkpoint_path)
 
-        if self._step_count % self.config.target_update_interval == 0:
-            logger.info(f"Updating target network at step {self._step_count}")
-            self._target_model.load_state_dict(self._model.state_dict())
-        if self._step_count % self.config.save_interval == 0:
-            logger.info(
-                f"Saving model checkpoint at step {self._step_count} to {self.config.checkpoint_path}"
-            )
-            self._model.save(self.config.checkpoint_path)
+            # update epsilon
+            if self.config.epsilon_start > self.config.epsilon_min:
+                new_epsilon = max(
+                    self.config.epsilon_min,
+                    self.config.epsilon_start * self.config.epsilon_decay,
+                )
+                logger.debug(
+                    f"Updating epsilon from {self.config.epsilon_start} to {new_epsilon} at step {self._step_count}"
+                )
+                self.config.epsilon_start = new_epsilon
 
-        # update epsilon
-        if self.config.epsilon_start > self.config.epsilon_min:
-            new_epsilon = max(
-                self.config.epsilon_min,
-                self.config.epsilon_start * self.config.epsilon_decay,
-            )
-            logger.debug(
-                f"Updating epsilon from {self.config.epsilon_start} to {new_epsilon}"
-            )
-            self.config.epsilon_start = new_epsilon
+        self._prev_game_state = game_state
+
+        # should happen in _on_endgame, but just in case
+        if is_episode_done:
+            self._last_state.clear()
+            self._last_action.clear()
 
         await self.admin_client.send_request_tick()
 
@@ -285,9 +297,7 @@ class DQNTrainer:
             logger.debug(f"Skipping action for unit {unit_id}, because {action_type=}")
             return
         else:
-            logger.debug(
-                f"Sending action packet {action_packet} from {action_type=} for unit {unit_id}"
-            )
+            logger.debug(f"Sending action packet for {action_type=} for unit {unit_id}")
         await self.agent_client._send(action_packet.to_dict())
 
     async def _on_endgame(self, *args, **kwargs) -> None:
@@ -296,7 +306,7 @@ class DQNTrainer:
         self._feature_builder.reset_stack()
         self._last_state.clear()
         self._last_action.clear()
-        self._last_metrics.clear()
+        self._prev_game_state = None
         world_seed = random.randint(0, 2**31 - 1)
         logger.info(f"Starting new game with world seed {world_seed}")
         await self.admin_client.send_request_game_reset(world_seed=world_seed)
