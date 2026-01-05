@@ -721,6 +721,37 @@ class GameState:
 
         return my_units_bombs
 
+    def legal_actions(self, unit: UnitState) -> List[ActionType]:
+        """Return a list of legal ActionType values for the given unit."""
+        actions = [ActionType.NOOP]
+
+        # Movement
+        for direction, (dx, dy) in {
+            ActionType.UP: (0, 1),
+            ActionType.DOWN: (0, -1),
+            ActionType.LEFT: (-1, 0),
+            ActionType.RIGHT: (1, 0),
+        }.items():
+            new_x = unit.x + dx
+            new_y = unit.y + dy
+            if self.is_walkable(new_x, new_y, ignore_units=True):
+                actions.append(direction)
+
+        # Bomb placement
+        my_bombs = self.my_units_bombs(unit_id=unit.unit_id)
+        if unit.inventory.bombs > 0 and len(my_bombs) < 3:
+            actions.append(ActionType.PLACE_BOMB)
+
+        # Bomb detonations
+        if len(my_bombs) >= 1:
+            actions.append(ActionType.DETONATE_BOMB_0)
+        if len(my_bombs) >= 2:
+            actions.append(ActionType.DETONATE_BOMB_1)
+        if len(my_bombs) >= 3:
+            actions.append(ActionType.DETONATE_BOMB_2)
+
+        return actions
+
     def entities_of_type(self, entity_type: EntityType) -> List[Entity]:
         """Return all entities with the given EntityType."""
         return [e for e in self.entities if e.entity_type == entity_type]
