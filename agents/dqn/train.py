@@ -129,14 +129,16 @@ class DQNTrainer:
             self._optimizer = AdamW(
                 self._model.parameters(), lr=self.config.learning_rate
             )
-            if os.path.exists(self.config.load_path):
+            has_checkpoint = os.path.exists(self.config.load_path)
+            if has_checkpoint:
                 self._model.load(self.config.load_path)
-                self._target_model.load_state_dict(self._model.state_dict())
                 logger.info("Loaded checkpoint from %s", self.config.load_path)
             else:
                 logger.info(
                     f"No checkpoint found at {self.config.load_path}, training from scratch"
                 )
+            # Always start with a fresh target equal to the online network.
+            self._target_model.load_state_dict(self._model.state_dict())
 
         frame = self._feature_builder.encode_frame(game_state)
         stacked_state = self._feature_builder.update_frame_stack(frame)
