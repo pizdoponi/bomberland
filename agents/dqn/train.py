@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from dotenv import load_dotenv
 from dqn_config import DQNConfig
 from dqn_model import NUM_ACTIONS, ActionType, DQNModel, ReplayBuffer
@@ -163,30 +164,39 @@ class DQNTrainer:
         else:
             team_reward, units_reward, is_episode_done = 0.0, {}, False
 
+        timeout_reached = game_state.tick >= game_state.config.game_duration_ticks - 1
+        episode_done = is_episode_done or timeout_reached
+
         if TRAINING_MODE_ENABLED and self._prev_game_state is not None:
-            for unit_id, last_state in list(self._last_state.items()):
+            for unit_id, previous_state in list(self._last_state.items()):
                 head_index = self._feature_builder.unit_id_to_head_index(
                     unit_id, my_units_sorted
                 )
                 logger.debug(f"{unit_id=}, {head_index=}")
                 if head_index is None:
                     logger.error(
-                        f"Head index for unit {unit_id} is None, skipping transition storage"
+                        f"Head index for unit {unit_id} is None, dropping cached transition"
                     )
+                    self._last_state.pop(unit_id, None)
+                    self._last_action.pop(unit_id, None)
                     continue
 
                 last_action = self._last_action.get(unit_id)
                 if last_action is None:
                     logger.error(
-                        f"Last action for unit {unit_id} missing, skipping transition storage"
+                        f"Last action for unit {unit_id} missing, dropping cached transition"
                     )
+                    self._last_state.pop(unit_id, None)
+                    self._last_action.pop(unit_id, None)
                     continue
                 logger.debug(f"{unit_id=}, {last_action=}")
 
                 reward = units_reward.get(unit_id, team_reward)
 
                 if reward == team_reward:
-                    my_alive_units = {unit.unit_id for unit in game_state.my_alive_units}
+                    my_alive_units = {
+                        unit.unit_id for unit in game_state.my_alive_units
+                    }
                     is_unit_alive = (
                         game_state.get_unit(unit_id) is not None
                         and game_state.get_unit(unit_id) in my_alive_units
@@ -199,19 +209,28 @@ class DQNTrainer:
                 next_unit_state = game_state.get_unit(unit_id)
                 legal_actions_mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
                 legal_actions_mask[ActionType.NOOP.value] = 1.0  # always allow NOOP
-                if next_unit_state is not None and next_unit_state.is_alive():
+                unit_is_alive = (
+                    next_unit_state is not None and next_unit_state.is_alive()
+                )
+                if unit_is_alive:
                     for action in game_state.legal_actions(next_unit_state):
                         legal_actions_mask[action.value] = 1.0
 
+                transition_done = 1.0 if (episode_done or not unit_is_alive) else 0.0
+
                 self._replay_buffer.add(
-                    last_state,
+                    previous_state,
                     head_index,
-                    self._last_action[unit_id],
+                    last_action,
                     reward,
                     stacked_state,
                     legal_actions_mask,
-                    1.0 if is_episode_done else 0.0,
+                    transition_done,
                 )
+
+                if not unit_is_alive:
+                    self._last_state.pop(unit_id, None)
+                    self._last_action.pop(unit_id, None)
 
         state_tensor = (
             torch.from_numpy(stacked_state).float().unsqueeze(0).to(self.config.device)
@@ -237,7 +256,7 @@ class DQNTrainer:
             action_index = self._select_action(q_values[head_index], legal_actions)
             action_type = ActionType.from_index(action_index)
 
-            if TRAINING_MODE_ENABLED and not is_episode_done:
+            if TRAINING_MODE_ENABLED and not episode_done:
                 self._last_state[unit_id] = stacked_state
                 self._last_action[unit_id] = action_type
 
@@ -267,12 +286,12 @@ class DQNTrainer:
                 logger.debug(
                     f"Updating epsilon from {self.config.epsilon_start} to {new_epsilon} at step {self._step_count}"
                 )
-                self.config.epsilon_start = new_epsilon
+                self._epsilon = new_epsilon
 
         self._prev_game_state = game_state
 
         # should happen in _on_endgame, but just in case
-        if is_episode_done:
+        if episode_done:
             self._last_state.clear()
             self._last_action.clear()
 
@@ -290,38 +309,48 @@ class DQNTrainer:
             )
             return
 
-        sample = self._replay_buffer.sample(self.config.batch_size)
+        batch = self._replay_buffer.sample(self.config.batch_size)
 
-        states = torch.from_numpy(sample.states).float().to(self.config.device)
-        next_states = (
-            torch.from_numpy(sample.next_states).float().to(self.config.device)
+        state_batch = torch.from_numpy(batch.states).float().to(self.config.device)
+        next_state_batch = (
+            torch.from_numpy(batch.next_states).float().to(self.config.device)
         )
-        head_indices = (
-            torch.from_numpy(sample.head_indices).long().to(self.config.device)
+        head_index_batch = (
+            torch.from_numpy(batch.head_indices).long().to(self.config.device)
         )
-        actions = torch.from_numpy(sample.actions).long().to(self.config.device)
-        rewards = torch.from_numpy(sample.rewards).float().to(self.config.device)
-        next_legal_actions_mask = (
-            torch.from_numpy(sample.next_legal_actions_mask)
+        action_batch = torch.from_numpy(batch.actions).long().to(self.config.device)
+        reward_batch = torch.from_numpy(batch.rewards).float().to(self.config.device)
+        next_legal_action_mask_batch = (
+            torch.from_numpy(batch.next_legal_actions_mask)
             .float()
             .to(self.config.device)
         )
-        dones = torch.from_numpy(sample.dones).float().to(self.config.device)
+        done_batch = torch.from_numpy(batch.dones).float().to(self.config.device)
 
-        q_values = self._model(states)
-        q_selected = q_values[
-            torch.arange(self.config.batch_size), head_indices, actions
-        ]
+        batch_indices = torch.arange(self.config.batch_size, device=self.config.device)
+
+        q_values = self._model(state_batch)
+        predicted_q = q_values[batch_indices, head_index_batch, action_batch]
 
         with torch.no_grad():
-            q_next = self._target_model(next_states)
-            # Gather the head for the relevant unit, then mask illegal actions
-            q_next_head = q_next[torch.arange(self.config.batch_size), head_indices]
-            masked_q_next = q_next_head.masked_fill(next_legal_actions_mask == 0, -1e9)
-            max_q = torch.max(masked_q_next, dim=1).values
-            targets = rewards + (1.0 - dones) * self.config.gamma * max_q
+            q_next_online = self._model(next_state_batch)
+            q_next_online_head = q_next_online[batch_indices, head_index_batch]
+            masked_q_next_online = q_next_online_head.masked_fill(
+                next_legal_action_mask_batch == 0, -1e9
+            )
+            next_actions = torch.argmax(masked_q_next_online, dim=1)
 
-        loss = torch.mean((q_selected - targets) ** 2)
+            q_next_target = self._target_model(next_state_batch)
+            q_next_target_head = q_next_target[batch_indices, head_index_batch]
+            next_q_values = q_next_target_head.gather(
+                1, next_actions.unsqueeze(1)
+            ).squeeze(1)
+
+            target_values = (
+                reward_batch + (1.0 - done_batch) * self.config.gamma * next_q_values
+            )
+
+        loss = F.smooth_l1_loss(predicted_q, target_values)
         self._optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self._model.parameters(), 1.0)
@@ -329,7 +358,7 @@ class DQNTrainer:
 
         if self._step_count % 100 == 0:
             logger.info(
-                f"Step={self._step_count}, loss={loss}, epsilon={self.config.epsilon_start:.3f}",
+                f"Step={self._step_count}, loss={loss.item():.6f}, epsilon={self._epsilon:.3f}",
             )
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
