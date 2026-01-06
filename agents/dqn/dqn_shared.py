@@ -201,14 +201,14 @@ class DQNFeatureBuilder:
         gamma = self.config.gamma
         shaping_weight = 0.05
 
-        for u in curr_game_state.my_units:
-            if not u.is_alive():
-                continue
+        for unit in curr_game_state.my_alive_units:
             # PBRS-style: gamma*Phi(s') - Phi(s)
-            phi_prev = potential(prev_game_state, prev_game_state.get_unit(u.unit_id) or u)
-            phi_curr = potential(curr_game_state, u)
+            phi_prev = potential(
+                prev_game_state, prev_game_state.get_unit(unit.unit_id) or unit
+            )
+            phi_curr = potential(curr_game_state, unit)
             shaping = gamma * phi_curr - phi_prev
-            unit_rewards[u.unit_id] = team_reward + shaping_weight * shaping
+            unit_rewards[unit.unit_id] = team_reward + shaping_weight * shaping
 
         return team_reward, unit_rewards, done
 
