@@ -46,6 +46,7 @@ class DQNTrainer:
 
         self.config = DQNConfig(epsilon_decay=0.99999, learning_rate=0.0001)
         logger.info(f"config={self.config}")
+        self._epsilon = self.config.epsilon_start
 
         self._feature_builder = DQNFeatureBuilder(self.config)
 
@@ -335,9 +336,9 @@ class DQNTrainer:
             logger.warning("No legal actions available, defaulting to NOOP")
             return ActionType.NOOP.value
 
-        if (p := random.random()) < self.config.epsilon_start:
+        if (random_value := random.random()) < self._epsilon:
             logger.debug(
-                f"Selecting random legal action due to {p=} < epsilon={self.config.epsilon_start:.3f} from {legal_actions=}",
+                f"Selecting random legal action due to {random_value=} < epsilon={self._epsilon:.3f} from {legal_actions=}",
             )
             return random.choice(legal_actions)
         logger.debug(f"Selecting greedy action from {legal_actions=}")
