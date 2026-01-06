@@ -253,7 +253,10 @@ class DQNTrainer:
                 self._model.save(self.config.checkpoint_path)
 
             # update epsilon
-            if self.config.epsilon_start > self.config.epsilon_min:
+            if (
+                self._epsilon > self.config.epsilon_min
+                and len(self._replay_buffer) > self.config.warmup_steps
+            ):
                 new_epsilon = max(
                     self.config.epsilon_min,
                     self.config.epsilon_start * self.config.epsilon_decay,
