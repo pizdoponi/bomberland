@@ -3,15 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import (
-    Any,
-    Dict,
-    Iterable,
-    List,
-    Mapping,
-    Optional,
-    Union,
-)
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Union
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -423,10 +415,9 @@ class Entity:
         This marks things like bombs and active blasts / end-game fire as
         dangerous, but you may want additional logic based on timers.
         """
-        return self.entity_type in {
-            EntityType.BOMB,
-            EntityType.BLAST,  # includes end-game fire
-        }
+        return self.entity_type == EntityType.BLAST or (
+            self.entity_type == EntityType.BOMB and self.is_armed()
+        )
 
     def is_armed(self) -> bool:
         """Return True if this entity is a bomb that is armed (for at least 5 ticks)."""
@@ -840,7 +831,17 @@ class GameState:
         more advanced planning.
         """
         entities_here = self.entities_at(x, y)
-        return any(e.is_dangerous() for e in entities_here)
+        if any(e.is_dangerous() for e in entities_here):
+            return True
+
+        # simulate bomb blasts
+        all_bombs = [e for e in self.entities if e.entity_type == EntityType.BOMB]
+        for bomb in all_bombs:
+            blast_tiles = self.get_blast_tiles_if_detonated(bomb.position)
+            if Point(x, y) in blast_tiles:
+                return True
+
+        return False
 
     def get_blast_tiles_if_detonated(self, position: Point) -> Set[Point]:
         """Return a set of Points that would be affected by a bomb blast.
