@@ -199,11 +199,3 @@ class DQNFeatureBuilder:
 
         return team_reward, unit_rewards, done
 
-    def _is_walkable(
-        self, x: int, y: int, width: int, height: int, blocked_positions: set
-    ) -> bool:
-        if x < 0 or y < 0 or x >= width or y >= height:
-            return False
-        if (x, y) in blocked_positions:
-            return False
-        return True
