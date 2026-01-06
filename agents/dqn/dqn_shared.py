@@ -6,7 +6,7 @@ from typing import Deque, List
 import numpy as np
 from dqn_config import DQNConfig
 from dqn_model import ActionType
-from types_ import EntityType
+from types_ import EntityType, UnitState
 from types_ import GameState as TypedGameState
 
 MOVE_DELTAS = {
@@ -115,11 +115,11 @@ class DQNFeatureBuilder:
             )
         return idx
 
-
     def compute_team_and_unit_rewards(
         self,
         prev_game_state: TypedGameState,
         curr_game_state: TypedGameState,
+        actions_taken: dict[str, ActionType],
     ) -> tuple[float, dict[str, float], bool]:
         """
         Returns:
@@ -165,24 +165,69 @@ class DQNFeatureBuilder:
         team_reward = terminal + hp_term + death_term + step_penalty
 
         # ---------- Per-unit shaping (small): safety + enemy proximity ----------
-        def danger_score(game_state: TypedGameState, unit: UnitState) -> float:
-            if game_state.is_dangerous_tile(unit.x, unit.y):
+        def danger_score(unit: UnitState) -> float:
+            if curr_game_state.is_dangerous_tile(unit.x, unit.y):
                 return 1.0
             return 0.0
 
-        def enemy_proximity(game_state: TypedGameState, unit: UnitState) -> float:
-            enemies = game_state.enemy_alive_units
+        def enemy_proximity(unit: UnitState) -> float:
+            enemies = curr_game_state.enemy_alive_units
             if not enemies:
                 return 1.0
             dmin = min(unit.position.distance_to(e.position) for e in enemies)
             return 1.0 / (1.0 + float(dmin))
 
+        def proactivity(unit: UnitState) -> float:
+            action = actions_taken.get(unit.unit_id)
+            if action is None:
+                return 0.0
+            if action == ActionType.NOOP:
+                return -0.001
+            if action == ActionType.PLACE_BOMB:
+                return 0.1
+            if action.is_bomb_detonation():
+                blast_tiles = prev_game_state.get_blast_tiles_if_detonated(
+                    unit.position
+                )
+                blocks_hit = sum(
+                    1
+                    for point in blast_tiles
+                    for entity in prev_game_state.entities_at(point.x, point.y)
+                    if entity.entity_type
+                    in {
+                        EntityType.WOOD_BLOCK,
+                        EntityType.ORE_BLOCK,
+                    }
+                )
+                units_hit = sum(
+                    1
+                    for enemy in prev_game_state.enemy_alive_units
+                    if enemy.position in blast_tiles
+                )
+                return 0.1 * blocks_hit + 0.3 * units_hit
+            return 0.0
+
+        def stupidity(unit: UnitState) -> float:
+            action = actions_taken.get(unit.unit_id)
+            if action is None:
+                return 0.0
+            if action.is_movement():
+                dx, dy = MOVE_DELTAS[action]
+                new_x = unit.x + dx
+                new_y = unit.y + dy
+                if curr_game_state.is_dangerous_tile(new_x, new_y):
+                    return 0.3
+            if action.is_bomb_detonation() and (curr_my_hp < prev_my_hp):
+                # you don't detonate bombs if it hurts you stoopid
+                return 1
+            return 0.0
+
         # Potential: higher is better
-        def potential(game_state: TypedGameState, unit: UnitState) -> float:
+        def potential(unit: UnitState) -> float:
             if not unit.is_alive():
                 return 0.0
-            safe = 1.0 - danger_score(game_state, unit)
-            press = enemy_proximity(game_state, unit)
+            safe = 1.0 - 0.7 * stupidity(unit) - 0.3 * danger_score(unit)
+            press = 0.2 * enemy_proximity(unit) + 0.8 * proactivity(unit)
             return 0.65 * safe + 0.35 * press
 
         unit_rewards: dict[str, float] = {}
@@ -191,12 +236,9 @@ class DQNFeatureBuilder:
 
         for unit in curr_game_state.my_alive_units:
             # PBRS-style: gamma*Phi(s') - Phi(s)
-            phi_prev = potential(
-                prev_game_state, prev_game_state.get_unit(unit.unit_id) or unit
-            )
-            phi_curr = potential(curr_game_state, unit)
+            phi_prev = potential(prev_game_state.get_unit(unit.unit_id) or unit)
+            phi_curr = potential(unit)
             shaping = gamma * phi_curr - phi_prev
             unit_rewards[unit.unit_id] = team_reward + shaping_weight * shaping
 
         return team_reward, unit_rewards, done
-
