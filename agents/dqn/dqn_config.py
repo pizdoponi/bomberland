@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import torch
+
 
 @dataclass
 class DQNConfig:
@@ -31,3 +33,8 @@ class DQNConfig:
     max_stunned_duration: float = 15.0
     max_invulnerable_duration: float = 10.0
     device: str = "cuda"
+
+    def __post_init__(self) -> None:
+        """Fallback to CPU if CUDA is unavailable to avoid runtime crashes."""
+        if "cuda" in self.device.lower() and not torch.cuda.is_available():
+            self.device = "cpu"
