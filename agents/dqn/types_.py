@@ -81,6 +81,14 @@ class ActionType(Enum):
             ActionType.DETONATE_BOMB_2,
         }
 
+    def is_movement(self) -> bool:
+        return self in {
+            ActionType.UP,
+            ActionType.DOWN,
+            ActionType.LEFT,
+            ActionType.RIGHT,
+        }
+
 
 # ─────────────────────────────────────────────────────────────
 # Basic enums & small helper types
