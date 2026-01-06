@@ -166,14 +166,14 @@ class DQNFeatureBuilder:
 
         # ---------- Per-unit shaping (small): safety + enemy proximity ----------
         # This is intentionally simple (no full blast simulation).
-        def danger_score(gs: TypedGameState, unit) -> float:
+        def danger_score(game_state: TypedGameState, unit: UnitState) -> float:
             # Standing on blast is worst
-            if gs.is_dangerous_tile(unit.x, unit.y):
+            if game_state.is_dangerous_tile(unit.x, unit.y):
                 # bomb OR blast present
                 return 1.0
 
             # If you're near a blast tile, also bad
-            blasts = gs.entities_of_type(EntityType.BLAST)
+            blasts = game_state.entities_of_type(EntityType.BLAST)
             if blasts:
                 dmin = min(abs(unit.x - b.x) + abs(unit.y - b.y) for b in blasts)
                 if dmin == 1:
@@ -182,24 +182,24 @@ class DQNFeatureBuilder:
                     return 0.3
             return 0.0
 
-        def enemy_proximity(gs: TypedGameState, unit) -> float:
-            enemies = [e for e in gs.enemy_units if e.is_alive()]
+        def enemy_proximity(game_state: TypedGameState, unit: UnitState) -> float:
+            enemies = [e for e in game_state.enemy_units if e.is_alive()]
             if not enemies:
                 return 1.0
             dmin = min(unit.position.distance_to(e.position) for e in enemies)
             return 1.0 / (1.0 + float(dmin))
 
         # Potential: higher is better
-        def potential(gs: TypedGameState, unit) -> float:
+        def potential(game_state: TypedGameState, unit: UnitState) -> float:
             if not unit.is_alive():
                 return 0.0
-            safe = 1.0 - danger_score(gs, unit)
-            press = enemy_proximity(gs, unit)
+            safe = 1.0 - danger_score(game_state, unit)
+            press = enemy_proximity(game_state, unit)
             return 0.65 * safe + 0.35 * press
 
         unit_rewards: dict[str, float] = {}
         gamma = self.config.gamma
-        shaping_weight = 0.05
+        shaping_weight = 0.1
 
         for unit in curr_game_state.my_alive_units:
             # PBRS-style: gamma*Phi(s') - Phi(s)
