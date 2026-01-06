@@ -689,7 +689,11 @@ class GameState:
         """Get a unit by ID, or None if it doesn't exist in this state."""
         return self.units.get(unit_id)
 
-    # ------------- Entity lookup helpers -------------
+    def is_game_over(self) -> bool:
+        """Return True if the game is over (one agent has no living units)."""
+        my_alive = any(u.is_alive() for u in self.my_units)
+        enemy_alive = any(u.is_alive() for u in self.enemy_units)
+        return not (my_alive and enemy_alive)
 
     def my_units_bombs(
         self, unit_id: Optional[str] = None, bomb_idx: Optional[int] = None
