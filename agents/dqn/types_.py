@@ -842,6 +842,69 @@ class GameState:
         entities_here = self.entities_at(x, y)
         return any(e.is_dangerous() for e in entities_here)
 
+    def get_blast_tiles_if_detonated(self, position: Point) -> Set[Point]:
+        """Return a set of Points that would be affected by a bomb blast.
+
+        If there is no bomb at the given position, or that bomb is not armed, returns empty list.
+        Stops blast propagation when hitting solid blocks, and propagates
+        through other bombs (including their blast tiles).
+        """
+        entities_here = self.entities_at(position.x, position.y)
+        bombs_here = [e for e in entities_here if e.entity_type == EntityType.BOMB]
+
+        # there should be at most one bomb at a given position
+        assert len(bombs_here) <= 1, (
+            f"Multiple bombs found at the same position {position}"
+        )
+
+        if len(bombs_here) == 0:
+            return set()  # no bomb at this position
+
+        bomb = bombs_here[0]
+
+        if not bomb.is_armed():
+            return set()  # bomb is not armed
+
+        # bomb's own tile is always blown up
+        blast_tiles = {position}
+
+        # get blast radius
+        unit_id = bomb.owner_unit_id
+        assert unit_id is not None, "Bomb should have an owner_unit_id"
+        blast_radius = bomb.blast_radius(unit=self.get_unit(unit_id))
+
+        # check in each cardinal direction
+        for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            for distance in range(1, blast_radius + 1):
+                nx = position.x + dx * distance
+                ny = position.y + dy * distance
+                next_point = Point(nx, ny)
+
+                if not self.world.in_bounds(next_point):
+                    break
+
+                blast_tiles.add(next_point)
+
+                # stop if we hit a solid entity
+                entities_here = self.entities_at(nx, ny)
+                if any(
+                    e.entity_type
+                    in {
+                        EntityType.METAL_BLOCK,
+                        EntityType.ORE_BLOCK,
+                        EntityType.WOOD_BLOCK,
+                    }
+                    for e in entities_here
+                ):
+                    break
+
+                # propagate the blast if a bomb is hit
+                if any(e.entity_type == EntityType.BOMB for e in entities_here):
+                    blast_tiles.update(self.get_blast_tiles_if_detonated(next_point))
+                    break
+
+        return blast_tiles
+
 
 # ─────────────────────────────────────────────────────────────
 # Action packet dataclasses
