@@ -165,25 +165,13 @@ class DQNFeatureBuilder:
         team_reward = terminal + hp_term + death_term + step_penalty
 
         # ---------- Per-unit shaping (small): safety + enemy proximity ----------
-        # This is intentionally simple (no full blast simulation).
         def danger_score(game_state: TypedGameState, unit: UnitState) -> float:
-            # Standing on blast is worst
             if game_state.is_dangerous_tile(unit.x, unit.y):
-                # bomb OR blast present
                 return 1.0
-
-            # If you're near a blast tile, also bad
-            blasts = game_state.entities_of_type(EntityType.BLAST)
-            if blasts:
-                dmin = min(abs(unit.x - b.x) + abs(unit.y - b.y) for b in blasts)
-                if dmin == 1:
-                    return 0.7
-                if dmin == 2:
-                    return 0.3
             return 0.0
 
         def enemy_proximity(game_state: TypedGameState, unit: UnitState) -> float:
-            enemies = [e for e in game_state.enemy_units if e.is_alive()]
+            enemies = game_state.enemy_alive_units
             if not enemies:
                 return 1.0
             dmin = min(unit.position.distance_to(e.position) for e in enemies)
