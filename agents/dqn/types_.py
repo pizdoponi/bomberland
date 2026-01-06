@@ -420,9 +420,12 @@ class Entity:
             EntityType.BLAST,  # includes end-game fire
         }
 
-    def is_armed(self, tick: int) -> bool:
-        """Return True if this entity is a bomb that is armed (was created >= 5 ticks ago)."""
-        return self.entity_type == EntityType.BOMB and (tick - self.created) >= 5
+    def is_armed(self) -> bool:
+        """Return True if this entity is a bomb that is armed (for at least 5 ticks)."""
+        if self.entity_type == EntityType.BOMB:
+            assert self.expires is not None, "Bomb entity should have expires field"
+            return self.expires - self.created <= 25  # armed after 5 ticks
+        return False
 
     def blast_diameter_(self, unit: Optional[UnitState] = None) -> int:
         """Return the blast diameter if this entity is a bomb.
@@ -748,11 +751,11 @@ class GameState:
             actions.append(ActionType.PLACE_BOMB)
 
         # Bomb detonations
-        if len(my_bombs) >= 1 and my_bombs[0].is_armed(self.tick):
+        if len(my_bombs) >= 1 and my_bombs[0].is_armed():
             actions.append(ActionType.DETONATE_BOMB_0)
-        if len(my_bombs) >= 2 and my_bombs[1].is_armed(self.tick):
+        if len(my_bombs) >= 2 and my_bombs[1].is_armed():
             actions.append(ActionType.DETONATE_BOMB_1)
-        if len(my_bombs) >= 3 and my_bombs[2].is_armed(self.tick):
+        if len(my_bombs) >= 3 and my_bombs[2].is_armed():
             actions.append(ActionType.DETONATE_BOMB_2)
 
         return actions
