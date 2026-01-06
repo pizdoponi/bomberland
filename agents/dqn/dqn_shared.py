@@ -92,14 +92,27 @@ class DQNFeatureBuilder:
 
         return frame
 
-    def unit_id_to_head_index(
-        self, unit_id: str, sorted_units: List[str]
-    ) -> int | None:
-        if unit_id not in sorted_units:
-            return None
+    def unit_id_to_head_index(self, unit_id: str, units: List[str]) -> int:
+        """Get the head index for a given unit_id based on its position in the units list.
+
+        Args:
+            unit_id: The unique identifier of the unit.
+            units: List of unit IDs. The list is sorted to ensure consistent indexing.
+
+        Returns:
+            The index of the unit_id in the sorted units list, which corresponds to the head index.
+
+        Raises:
+            ValueError: If the unit_id is not found in the units list or if its index exceeds num_heads.
+        """
+        if unit_id not in units:
+            raise ValueError(f"unit_id {unit_id} not in units list {units}")
+        sorted_units = sorted(units)
         idx = sorted_units.index(unit_id)
         if idx >= self.num_heads:
-            return None
+            raise ValueError(
+                f"unit_id {unit_id} index {idx} exceeds num_heads {self.num_heads}"
+            )
         return idx
 
 
