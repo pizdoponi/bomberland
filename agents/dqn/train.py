@@ -150,7 +150,7 @@ class DQNTrainer:
         if self._prev_game_state is not None:
             team_reward, units_reward, is_episode_done = (
                 self._feature_builder.compute_team_and_unit_rewards(
-                    self._prev_game_state, game_state
+                    self._prev_game_state, game_state, self._last_action
                 )
             )
             logger.debug(
