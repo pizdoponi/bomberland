@@ -14,8 +14,8 @@ from dqn_model import NUM_ACTIONS, ActionType, DQNModel, ReplayBuffer
 from dqn_shared import DQNFeatureBuilder
 from game_state import GameState
 from torch.optim.adamw import AdamW
+from types_ import MAX_CONCURRENT_BOMBS_PER_AGENT, SkipAction
 from types_ import GameState as TypedGameState
-from types_ import SkipAction
 
 load_dotenv()
 
@@ -249,6 +249,9 @@ class DQNTrainer:
             q_values = self._model(state_tensor)[0].cpu().numpy()
         self._model.train()
 
+        agent_bombs_in_play = len(game_state.my_units_bombs())
+        pending_bomb_placements = 0
+
         for unit_id in my_units_sorted:
             unit_state = game_state.get_unit(unit_id)
             if unit_state is None or not unit_state.is_alive():
@@ -262,10 +265,23 @@ class DQNTrainer:
                 continue
 
             legal_action_types = game_state.legal_actions(unit_state)
+            if (
+                ActionType.PLACE_BOMB in legal_action_types
+                and agent_bombs_in_play + pending_bomb_placements
+                >= MAX_CONCURRENT_BOMBS_PER_AGENT
+            ):
+                legal_action_types = [
+                    action
+                    for action in legal_action_types
+                    if action != ActionType.PLACE_BOMB
+                ]
             legal_actions = [action.value for action in legal_action_types]
 
             action_index = self._select_action(q_values[head_index], legal_actions)
             action_type = ActionType.from_index(action_index)
+
+            if action_type == ActionType.PLACE_BOMB:
+                pending_bomb_placements += 1
 
             if TRAINING_MODE_ENABLED and not episode_done:
                 self._last_state[unit_id] = stacked_state
