@@ -54,6 +54,7 @@ class DQNTrainer:
 
         self._last_state: Dict[str, np.ndarray] = {}
         self._last_action: Dict[str, ActionType] = {}
+        self._last_legal_actions: Dict[str, List[int]] = {}
         self._prev_game_state: Optional[TypedGameState] = None
 
         self._step_count = 0
@@ -174,6 +175,7 @@ class DQNTrainer:
                     )
                     self._last_state.pop(unit_id, None)
                     self._last_action.pop(unit_id, None)
+                    self._last_legal_actions.pop(unit_id, None)
                     continue
 
                 last_action = self._last_action.get(unit_id)
@@ -183,8 +185,20 @@ class DQNTrainer:
                     )
                     self._last_state.pop(unit_id, None)
                     self._last_action.pop(unit_id, None)
+                    self._last_legal_actions.pop(unit_id, None)
                     continue
                 logger.debug(f"{unit_id=}, {last_action=}")
+
+                last_legal_actions = self._last_legal_actions.get(unit_id)
+                if last_legal_actions is None:
+                    logger.error(
+                        f"Last legal actions for unit {unit_id} missing, dropping cached transition"
+                    )
+                    self._last_state.pop(unit_id, None)
+                    self._last_action.pop(unit_id, None)
+                    self._last_legal_actions.pop(unit_id, None)
+                    continue
+                logger.debug(f"{unit_id=}, {last_legal_actions=}")
 
                 reward = units_reward.get(unit_id, team_reward)
 
@@ -208,8 +222,8 @@ class DQNTrainer:
                     next_unit_state is not None and next_unit_state.is_alive()
                 )
                 if unit_is_alive:
-                    for action in game_state.legal_actions(next_unit_state):
-                        legal_actions_mask[action.value] = 1.0
+                    for action in last_legal_actions:
+                        legal_actions_mask[action] = 1.0
 
                 transition_done = 1.0 if (episode_done or not unit_is_alive) else 0.0
 
@@ -254,6 +268,7 @@ class DQNTrainer:
             if TRAINING_MODE_ENABLED and not episode_done:
                 self._last_state[unit_id] = stacked_state
                 self._last_action[unit_id] = action_type
+                self._last_legal_actions[unit_id] = legal_actions
 
             await self._execute_action(unit_id, action_type, game_state)
 
