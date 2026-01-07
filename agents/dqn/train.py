@@ -45,7 +45,13 @@ class DQNTrainer:
         self.admin_client = GameState(admin_uri)
         self.agent_client = GameState(agent_uri)
 
-        self.config = DQNConfig(epsilon_decay=0.99999, learning_rate=0.0001)
+        self.config = DQNConfig(
+            epsilon_decay=0.9999,
+            learning_rate=0.0001,
+            target_update_interval=1000,
+            batch_size=1024,
+            replay_capacity=20_000,
+        )
         logger.info(f"config={self.config}")
         self._epsilon = self.config.epsilon_start
 
