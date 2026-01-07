@@ -190,7 +190,11 @@ class DQNModel(nn.Module):
         torch.save(self.state_dict(), path)
 
     def load(self, path: str) -> None:
-        self.load_state_dict(torch.load(path, map_location="cpu"))
+        self.load_state_dict(
+            torch.load(
+                path, map_location="cuda" if torch.cuda.is_available() else "cpu"
+            )
+        )
 
     @staticmethod
     def from_checkpoint(path: str, **kwargs) -> "DQNModel":
