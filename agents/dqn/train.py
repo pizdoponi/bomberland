@@ -244,8 +244,10 @@ class DQNTrainer:
         state_tensor = (
             torch.from_numpy(stacked_state).float().unsqueeze(0).to(self.config.device)
         )
+        self._model.eval()
         with torch.no_grad():
             q_values = self._model(state_tensor)[0].cpu().numpy()
+        self._model.train()
 
         for unit_id in my_units_sorted:
             unit_state = game_state.get_unit(unit_id)
