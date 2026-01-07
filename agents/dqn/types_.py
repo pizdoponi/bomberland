@@ -8,6 +8,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Union
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+# Constants aligned with engine defaults.
+BOMB_ARMED_TICKS = 5
+MAX_CONCURRENT_BOMBS_PER_AGENT = 3
+
 # mines
 
 
@@ -417,21 +421,20 @@ class Entity:
             EntityType.FREEZE_POWERUP,
         }
 
-    def is_dangerous(self) -> bool:
+    def is_dangerous(self, current_tick: int) -> bool:
         """Return True if standing on this tile is immediately dangerous.
 
         This marks things like bombs and active blasts / end-game fire as
         dangerous, but you may want additional logic based on timers.
         """
         return self.entity_type == EntityType.BLAST or (
-            self.entity_type == EntityType.BOMB and self.is_armed()
+            self.entity_type == EntityType.BOMB and self.is_armed(current_tick)
         )
 
-    def is_armed(self) -> bool:
+    def is_armed(self, current_tick: int) -> bool:
         """Return True if this entity is a bomb that is armed (for at least 5 ticks)."""
         if self.entity_type == EntityType.BOMB:
-            assert self.expires is not None, "Bomb entity should have expires field"
-            return self.expires - self.created <= 25  # armed after 5 ticks
+            return current_tick - self.created > BOMB_ARMED_TICKS
         return False
 
     def blast_diameter_(self, unit: Optional[UnitState] = None) -> int:
@@ -594,6 +597,9 @@ class GameState:
     tick: int
     config: Config
     connection: Connection
+    _blast_tiles_cache: Dict[tuple, Set[Point]] = field(
+        default_factory=dict, repr=False
+    )
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "GameState":
@@ -731,9 +737,11 @@ class GameState:
             # Sort bombs by creation tick to determine order
             my_units_bombs.sort(key=lambda b: b.created)
             if my_units_bombs and len(my_units_bombs) > bomb_idx:
-                return [my_units_bombs[bomb_idx]]
+                my_units_bombs = [my_units_bombs[bomb_idx]]
             else:
-                return []
+                my_units_bombs = []
+
+        logger.debug(f"My units' bombs for unit {unit_id} at index {bomb_idx} at tick {self.tick}: {my_units_bombs}")
 
         return my_units_bombs
 
@@ -741,7 +749,8 @@ class GameState:
         """Return a list of legal ActionType values for the given unit."""
         actions = [ActionType.NOOP]
 
-        if unit.is_stunned(self.tick):
+        execution_tick = self.tick + 1
+        if unit.is_stunned(execution_tick):
             return [ActionType.NOOP]  # If stunned, only NOOP is legal
 
         # Movement
@@ -757,17 +766,37 @@ class GameState:
                 actions.append(direction)
 
         # Bomb placement
-        my_bombs = self.my_units_bombs(unit_id=unit.unit_id)
-        if unit.inventory.bombs > 0 and len(my_bombs) < 3:
+        agent_unit_ids = {
+            unit_state.unit_id
+            for unit_state in self.units.values()
+            if unit_state.agent_id == unit.agent_id
+        }
+        agent_bombs = [
+            entity
+            for entity in self.entities
+            if entity.entity_type == EntityType.BOMB
+            and entity.owner_unit_id in agent_unit_ids
+        ]
+        if (
+            unit.inventory.bombs > 0
+            and len(agent_bombs) < MAX_CONCURRENT_BOMBS_PER_AGENT
+        ):
             actions.append(ActionType.PLACE_BOMB)
 
         # Bomb detonations
-        if len(my_bombs) >= 1 and my_bombs[0].is_armed():
+        my_bombs = sorted(
+            self.my_units_bombs(unit_id=unit.unit_id), key=lambda bomb: bomb.created
+        )
+        if len(my_bombs) >= 1 and my_bombs[0].is_armed(execution_tick):
             actions.append(ActionType.DETONATE_BOMB_0)
-        if len(my_bombs) >= 2 and my_bombs[1].is_armed():
+        if len(my_bombs) >= 2 and my_bombs[1].is_armed(execution_tick):
             actions.append(ActionType.DETONATE_BOMB_1)
-        if len(my_bombs) >= 3 and my_bombs[2].is_armed():
+        if len(my_bombs) >= 3 and my_bombs[2].is_armed(execution_tick):
             actions.append(ActionType.DETONATE_BOMB_2)
+
+        logger.debug(
+            f"Legal actions for unit {unit.unit_id} at tick {self.tick} are: {[a.name for a in actions]}"
+        )
 
         return actions
 
@@ -812,7 +841,7 @@ class GameState:
         This checks world bounds and solid entities. By default bombs
         are considered blocking. Set `ignore_bombs=True` if you want to
         consider bombs as walkable (e.g. for planning via bomb timing).
-        Set `ignore_units=True` to ignore other living units on the tile.
+        Set `ignore_units=True` to ignore other units on the tile.
         """
         point = Point(x, y)
         if not self.world.in_bounds(point):
@@ -820,7 +849,7 @@ class GameState:
 
         if not ignore_units:
             for u in self.all_units:
-                if u.is_alive() and u.x == x and u.y == y:
+                if u.x == x and u.y == y:
                     return False
 
         entities_here = self.entities_at(x, y)
@@ -843,7 +872,7 @@ class GameState:
         more advanced planning.
         """
         entities_here = self.entities_at(x, y)
-        if any(e.is_dangerous() for e in entities_here):
+        if any(e.is_dangerous(self.tick) for e in entities_here):
             return True
 
         # simulate bomb blasts
@@ -855,12 +884,20 @@ class GameState:
 
         return False
 
-    def get_blast_tiles_if_detonated(self, position: Point) -> Set[Point]:
+    def get_blast_tiles_if_detonated(
+        self,
+        position: Point,
+        _visited: Optional[Set[Point]] = None,
+        require_armed: bool = True,
+    ) -> Set[Point]:
         """Return a set of Points that would be affected by a bomb blast.
 
-        If there is no bomb at the given position, or that bomb is not armed, returns empty list.
+        If there is no bomb at the given position, or (when require_armed is True)
+        that bomb is not armed, returns empty list.
         Stops blast propagation when hitting solid blocks, and propagates
         through other bombs (including their blast tiles).
+
+        Results are cached by position for efficiency within this GameState instance.
         """
         entities_here = self.entities_at(position.x, position.y)
         bombs_here = [e for e in entities_here if e.entity_type == EntityType.BOMB]
@@ -875,8 +912,24 @@ class GameState:
 
         bomb = bombs_here[0]
 
-        if not bomb.is_armed():
+        if require_armed and not bomb.is_armed(self.tick):
             return set()  # bomb is not armed
+
+        # Create cache key based on bomb position
+        cache_key = (position.x, position.y, require_armed)
+
+        # Check cache first
+        if cache_key in self._blast_tiles_cache:
+            return self._blast_tiles_cache[cache_key]
+
+        # Track visited bombs to avoid infinite recursion in chain detonations
+        if _visited is None:
+            _visited = set()
+
+        if position in _visited:
+            return set()  # Already processing this bomb (cycle detection)
+
+        _visited.add(position)
 
         # bomb's own tile is always blown up
         blast_tiles = {position}
@@ -913,8 +966,21 @@ class GameState:
 
                 # propagate the blast if a bomb is hit
                 if any(e.entity_type == EntityType.BOMB for e in entities_here):
-                    blast_tiles.update(self.get_blast_tiles_if_detonated(next_point))
+                    blast_tiles.update(
+                        self.get_blast_tiles_if_detonated(
+                            next_point,
+                            _visited,
+                            require_armed=False,
+                        )
+                    )
                     break
+
+        # Cache the result
+        self._blast_tiles_cache[cache_key] = blast_tiles
+
+        logger.debug(
+            f"Blast tiles for bomb at {position} (tick {self.tick}): {blast_tiles}"
+        )
 
         return blast_tiles
 
