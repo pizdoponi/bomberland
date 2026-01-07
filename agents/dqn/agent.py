@@ -2,51 +2,75 @@ import asyncio
 import logging
 import os
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
+from dotenv import load_dotenv
 from dqn_config import DQNConfig
 from dqn_model import NUM_ACTIONS, ActionType, DQNModel
-from dqn_shared import DQNFeatureBuilder, action_to_move
+from dqn_shared import DQNFeatureBuilder
 from game_state import GameState
 from types_ import GameState as TypedGameState
+from types_ import MAX_CONCURRENT_BOMBS_PER_AGENT, SkipAction
+
+load_dotenv()
+
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="[dqn] %(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.DEBUG,
+    format="[dqn-agent] %(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-uri = os.environ.get(
-    "GAME_CONNECTION_STRING"
-) or "ws://127.0.0.1:3000/?role=agent&agentId=agentId&name=defaultName"
+
+agent_uri = (
+    os.environ.get("GAME_CONNECTION_STRING")
+    or "ws://game-engine:3000/?role=agent&agentId=agentA&name=dqn-agent"
+)
+
+logger.info(f"{agent_uri=}")
 
 
 class DQNAgent:
     def __init__(self) -> None:
-        self._client = GameState(uri)
-        self._client.set_game_tick_callback(self._on_game_tick)
+        self.agent_client = GameState(agent_uri)
 
-        self.config = DQNConfig.from_env()
-        self._device = torch.device(self.config.device)
+        self.config = DQNConfig(
+            epsilon_decay=0.99995,
+            learning_rate=0.0001,
+            target_update_interval=1000,
+            batch_size=512,
+            replay_capacity=50_000,
+        )
+        logger.info(f"config={self.config}")
 
         self._feature_builder = DQNFeatureBuilder(self.config)
 
-        self._model = None
+        self._model: Optional[DQNModel] = None
         self._step_count = 0
 
-        loop = asyncio.get_event_loop()
-        connection = loop.run_until_complete(self._client.connect())
-        tasks = [asyncio.ensure_future(self._client._handle_messages(connection))]
-        loop.run_until_complete(asyncio.wait(tasks))
+    async def run(self):
+        logger.info(f"Connection agent to game engine at {agent_uri}")
+        agent_connection = await self.agent_client.connect()
 
-    async def _on_game_tick(self, tick_number: int, game_state: Dict):
+        self.agent_client.set_game_tick_callback(self._on_game_tick)
+
+        agent_task = asyncio.create_task(
+            self.agent_client._handle_messages(agent_connection)  # type: ignore
+        )
+
+        logger.info("Creating agent task")
+        await asyncio.gather(agent_task)
+
+    async def _on_game_tick(self, tick_number: int, game_state_: Dict):
+        logger.debug(f"Step={self._step_count}, {tick_number=}")
         self._step_count += 1
 
-        typed_state = TypedGameState.from_dict(game_state)
-        my_units = typed_state.my_units
-        my_units_sorted = sorted([unit.unit_id for unit in my_units])
+        game_state = TypedGameState.from_dict(game_state_)
+
+        my_units_sorted = sorted([unit.unit_id for unit in game_state.my_units])
+        logger.debug(f"{my_units_sorted=}")
 
         if self._model is None:
             in_channels = (
@@ -56,78 +80,95 @@ class DQNAgent:
                 conv_in_channels=in_channels,
                 conv_hidden_channels=self.config.conv_hidden_channels,
                 conv_out_channels=self.config.conv_out_channels,
-                height=typed_state.world.height,
-                width=typed_state.world.width,
+                height=game_state.world.height,
+                width=game_state.world.width,
                 num_heads=self._feature_builder.num_heads,
                 num_actions=NUM_ACTIONS,
                 fc_hidden_dim=self.config.fc_hidden_dim,
-            ).to(self._device)
-            if os.path.exists(self.config.load_path):
-                self._model.load(self.config.load_path)
-                logger.info("Loaded checkpoint from %s", self.config.load_path)
-            else:
-                logger.warning(
-                    "No checkpoint found at %s; using untrained model.",
-                    self.config.load_path,
+            ).to(self.config.device)
+            if not os.path.exists(self.config.load_path):
+                raise FileNotFoundError(
+                    f"Expected model checkpoint at {self.config.load_path}"
                 )
+            self._model.load(self.config.load_path)
+            logger.info("Loaded checkpoint from %s", self.config.load_path)
+            self._model.eval()
 
-        frame = self._feature_builder.encode_frame(typed_state)
+        frame = self._feature_builder.encode_frame(game_state)
         stacked_state = self._feature_builder.update_frame_stack(frame)
-        cache = self._feature_builder.build_cache(typed_state)
+
+        logger.debug(
+            f"frame.shape={frame.shape}, stacked_state.shape={stacked_state.shape}"
+        )
 
         state_tensor = (
-            torch.from_numpy(stacked_state).float().unsqueeze(0).to(self._device)
+            torch.from_numpy(stacked_state).float().unsqueeze(0).to(self.config.device)
         )
         with torch.no_grad():
             q_values = self._model(state_tensor)[0].cpu().numpy()
 
+        agent_bombs_in_play = len(game_state.my_units_bombs())
+        pending_bomb_placements = 0
+
         for unit_id in my_units_sorted:
-            unit_state = typed_state.get_unit(unit_id)
+            unit_state = game_state.get_unit(unit_id)
             if unit_state is None or not unit_state.is_alive():
                 continue
 
             head_index = self._feature_builder.unit_id_to_head_index(
                 unit_id, my_units_sorted
             )
+            logger.debug(f"{unit_id=}, {head_index=}")
             if head_index is None:
                 continue
 
-            legal_actions = self._feature_builder.legal_actions(
-                typed_state, unit_id, cache
-            )
+            legal_action_types = game_state.legal_actions(unit_state)
+            if (
+                ActionType.PLACE_BOMB in legal_action_types
+                and agent_bombs_in_play + pending_bomb_placements
+                >= MAX_CONCURRENT_BOMBS_PER_AGENT
+            ):
+                legal_action_types = [
+                    action
+                    for action in legal_action_types
+                    if action != ActionType.PLACE_BOMB
+                ]
+            legal_actions = [action.value for action in legal_action_types]
+
             action_index = self._select_action(q_values[head_index], legal_actions)
             action_type = ActionType.from_index(action_index)
-            await self._execute_action(unit_id, action_type, cache.team_bombs)
+
+            if action_type == ActionType.PLACE_BOMB:
+                pending_bomb_placements += 1
+
+            await self._execute_action(unit_id, action_type, game_state)
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
         if not legal_actions:
+            logger.warning("No legal actions available, defaulting to NOOP")
             return ActionType.NOOP.value
+        logger.debug(f"Selecting greedy action from {legal_actions=}")
         return max(legal_actions, key=lambda idx: q_values[idx])
 
     async def _execute_action(
-        self, unit_id: str, action_type: ActionType, team_bombs: List[Tuple[int, int]]
+        self, unit_id: str, action_type: ActionType, game_state: TypedGameState
     ) -> None:
-        move = action_to_move(action_type)
-
-        if move is not None:
-            await self._client.send_move(move, unit_id)
-        elif action_type == ActionType.PLACE_BOMB:
-            await self._client.send_bomb(unit_id)
-        elif action_type == ActionType.DETONATE_BOMB:
-            if team_bombs:
-                x, y = team_bombs[0]
-                await self._client.send_detonate(x, y, unit_id)
-        elif action_type == ActionType.NOOP:
+        logger.debug(f"Executing action {action_type} for unit {unit_id}")
+        action_packet = action_type.to_action_packet(unit_id, game_state)
+        if isinstance(action_packet, SkipAction):
+            logger.debug(f"Skipping action for unit {unit_id}, because {action_type=}")
             return
         else:
-            logger.warning("Unhandled action %s for unit %s", action_type, unit_id)
-
+            logger.debug(f"Sending action packet for {action_type=} for unit {unit_id}")
+        await self.agent_client._send(action_packet.to_dict())
 
 def main() -> None:
     for _ in range(0, 10):
         while True:
             try:
-                DQNAgent()
+                agent = DQNAgent()
+                asyncio.run(agent.run())
+
             except Exception as exc:
                 logger.error("Agent error: %s", exc)
                 time.sleep(5)
