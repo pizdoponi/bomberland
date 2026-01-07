@@ -90,10 +90,12 @@ class ReplayBuffer:
 
 class ResNetBlock(nn.Module):
     """
-    Basic ResNet block (2x 3x3 conv)
+    Basic ResNet block (2x 3x3 conv) using LayerNorm instead of BatchNorm.
+    LayerNorm is more stable for RL because it doesn't track running statistics
+    and works consistently regardless of train/eval mode switching.
     """
 
-    def __init__(self, in_channels, out_channels, stride=1):
+    def __init__(self, in_channels, out_channels, height=15, width=15, stride=1):
         super().__init__()
         self.conv1 = nn.Conv2d(
             in_channels,
@@ -103,7 +105,8 @@ class ResNetBlock(nn.Module):
             padding=1,
             bias=False,
         )
-        self.bn1 = nn.BatchNorm2d(out_channels)
+        # LayerNorm over [C, H, W] - more stable for RL than BatchNorm
+        self.ln1 = nn.LayerNorm([out_channels, height, width])
 
         self.conv2 = nn.Conv2d(
             out_channels,
@@ -113,7 +116,7 @@ class ResNetBlock(nn.Module):
             padding=1,
             bias=False,
         )
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.ln2 = nn.LayerNorm([out_channels, height, width])
 
         # residual connection (identity or projection)
         self.residual_connection = nn.Identity()
@@ -126,18 +129,18 @@ class ResNetBlock(nn.Module):
                     stride=stride,
                     bias=False,
                 ),
-                nn.BatchNorm2d(out_channels),
+                nn.LayerNorm([out_channels, height, width]),
             )
 
     def forward(self, x):
         identity = self.residual_connection(x)
 
         out = self.conv1(x)
-        out = self.bn1(out)
+        out = self.ln1(out)
         out = F.relu(out, inplace=True)
 
         out = self.conv2(out)
-        out = self.bn2(out)
+        out = self.ln2(out)
 
         out += identity
         out = F.relu(out, inplace=True)
@@ -159,11 +162,12 @@ class DQNModel(nn.Module):
     ) -> None:
         super().__init__()
         # > 7 convolutional layers, so that each tile can "see" the entire map
+        # Pass height/width to ResNetBlock for LayerNorm dimensions
         self.stem = nn.Sequential(
-            ResNetBlock(conv_in_channels, conv_hidden_channels),
-            ResNetBlock(conv_hidden_channels, conv_hidden_channels),
-            ResNetBlock(conv_hidden_channels, conv_hidden_channels),
-            ResNetBlock(conv_hidden_channels, conv_out_channels),
+            ResNetBlock(conv_in_channels, conv_hidden_channels, height, width),
+            ResNetBlock(conv_hidden_channels, conv_hidden_channels, height, width),
+            ResNetBlock(conv_hidden_channels, conv_hidden_channels, height, width),
+            ResNetBlock(conv_hidden_channels, conv_out_channels, height, width),
         )
 
         conv_out_dim = conv_out_channels * height * width
@@ -190,11 +194,16 @@ class DQNModel(nn.Module):
         torch.save(self.state_dict(), path)
 
     def load(self, path: str) -> None:
-        self.load_state_dict(
-            torch.load(
-                path, map_location="cuda" if torch.cuda.is_available() else "cpu"
-            )
+        checkpoint = torch.load(
+            path,
+            map_location="cuda" if torch.cuda.is_available() else "cpu",
+            weights_only=True,
         )
+        # Handle both new checkpoint format and legacy format
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            self.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            self.load_state_dict(checkpoint)
 
     @staticmethod
     def from_checkpoint(path: str, **kwargs) -> "DQNModel":

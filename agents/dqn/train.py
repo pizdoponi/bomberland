@@ -3,7 +3,9 @@ import logging
 import os
 import random
 import time
-from typing import Dict, List, Optional
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Deque, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -22,9 +24,13 @@ load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
-    format="[dqn-train] %(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="[dqn-train] %(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Set debug level from environment
+if os.environ.get("DEBUG", "0") == "1":
+    logger.setLevel(logging.DEBUG)
 
 
 TRAINING_MODE_ENABLED = str(os.environ.get("TRAINING_MODE_ENABLED", "0")) == "1"
@@ -40,18 +46,67 @@ logger.info(f"{admin_uri=}")
 logger.info(f"{agent_uri=}")
 
 
+@dataclass
+class TrainingMetrics:
+    """Track training metrics for monitoring progress."""
+
+    # Per-game metrics
+    game_rewards: Deque[float] = field(default_factory=lambda: deque(maxlen=100))
+    game_lengths: Deque[int] = field(default_factory=lambda: deque(maxlen=100))
+    game_wins: Deque[int] = field(default_factory=lambda: deque(maxlen=100))  # 1=win, 0=loss, 0.5=draw
+
+    # Per-step metrics
+    losses: Deque[float] = field(default_factory=lambda: deque(maxlen=1000))
+    q_values: Deque[float] = field(default_factory=lambda: deque(maxlen=1000))
+    td_errors: Deque[float] = field(default_factory=lambda: deque(maxlen=1000))
+
+    # Current game tracking
+    current_game_reward: float = 0.0
+    current_game_length: int = 0
+
+    def reset_game(self):
+        self.current_game_reward = 0.0
+        self.current_game_length = 0
+
+    def add_step_reward(self, reward: float):
+        self.current_game_reward += reward
+        self.current_game_length += 1
+
+    def end_game(self, win: Optional[bool]):
+        self.game_rewards.append(self.current_game_reward)
+        self.game_lengths.append(self.current_game_length)
+        if win is None:
+            self.game_wins.append(0.5)
+        else:
+            self.game_wins.append(1.0 if win else 0.0)
+        self.reset_game()
+
+    def add_loss(self, loss: float):
+        self.losses.append(loss)
+
+    def add_q_value(self, q_val: float):
+        self.q_values.append(q_val)
+
+    def add_td_error(self, td_error: float):
+        self.td_errors.append(td_error)
+
+    def get_summary(self) -> Dict[str, float]:
+        return {
+            "avg_reward_100": np.mean(self.game_rewards) if self.game_rewards else 0.0,
+            "avg_length_100": np.mean(self.game_lengths) if self.game_lengths else 0.0,
+            "win_rate_100": np.mean(self.game_wins) if self.game_wins else 0.0,
+            "avg_loss_1000": np.mean(self.losses) if self.losses else 0.0,
+            "avg_q_1000": np.mean(self.q_values) if self.q_values else 0.0,
+            "avg_td_error_1000": np.mean(self.td_errors) if self.td_errors else 0.0,
+        }
+
+
 class DQNTrainer:
     def __init__(self) -> None:
         self.admin_client = GameState(admin_uri)
         self.agent_client = GameState(agent_uri)
 
-        self.config = DQNConfig(
-            epsilon_decay=0.9999,
-            learning_rate=0.0001,
-            target_update_interval=1000,
-            batch_size=1024,
-            replay_capacity=20_000,
-        )
+        self.config = DQNConfig()
         logger.info(f"config={self.config}")
         self._epsilon = self.config.epsilon_start
 
@@ -68,6 +123,10 @@ class DQNTrainer:
         self._first_tick_event = asyncio.Event()
 
         self._games_played = 0
+        self._training_start_time = time.time()
+
+        # Metrics tracking
+        self._metrics = TrainingMetrics()
 
         in_channels = self._feature_builder.num_channels * self.config.frame_stack_size
         self._model = DQNModel(
@@ -92,12 +151,24 @@ class DQNTrainer:
             fc_hidden_dim=self.config.fc_hidden_dim,
         ).to(self.config.device)
 
-        self._optimizer = AdamW(self._model.parameters(), lr=self.config.learning_rate)
+        self._optimizer = AdamW(
+            self._model.parameters(),
+            lr=self.config.learning_rate,
+            weight_decay=1e-5,  # Small L2 regularization
+        )
+
+        # Learning rate scheduler - reduce LR when stuck
+        self._scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self._optimizer,
+            mode='max',
+            factor=0.5,
+            patience=50,  # In terms of log intervals
+            verbose=True,
+        )
 
         has_checkpoint = os.path.exists(self.config.load_path)
         if has_checkpoint:
-            self._model.load(self.config.load_path)
-            logger.info("Loaded checkpoint from %s", self.config.load_path)
+            self._load_checkpoint()
         else:
             logger.info(
                 f"No checkpoint found at {self.config.load_path}, training from scratch"
@@ -105,6 +176,52 @@ class DQNTrainer:
 
         # Always start with a fresh target equal to the online network.
         self._target_model.load_state_dict(self._model.state_dict())
+        self._target_model.eval()  # Target never trains
+
+        # Log model info
+        total_params = sum(p.numel() for p in self._model.parameters())
+        logger.info(f"Model has {total_params:,} parameters")
+
+    def _load_checkpoint(self):
+        """Load model checkpoint with error handling."""
+        try:
+            checkpoint = torch.load(
+                self.config.load_path,
+                map_location=self.config.device,
+                weights_only=True,
+            )
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                self._model.load_state_dict(checkpoint['model_state_dict'])
+                if 'optimizer_state_dict' in checkpoint:
+                    self._optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                if 'step_count' in checkpoint:
+                    self._step_count = checkpoint['step_count']
+                if 'epsilon' in checkpoint:
+                    self._epsilon = checkpoint['epsilon']
+                if 'games_played' in checkpoint:
+                    self._games_played = checkpoint['games_played']
+                logger.info(f"Loaded full checkpoint from {self.config.load_path}")
+                logger.info(f"  Resuming from step {self._step_count}, epsilon {self._epsilon:.4f}")
+            else:
+                # Old format - just state dict
+                self._model.load_state_dict(checkpoint)
+                logger.info(f"Loaded weights-only checkpoint from {self.config.load_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load checkpoint: {e}. Starting fresh.")
+
+    def _save_checkpoint(self):
+        """Save model checkpoint with training state."""
+        os.makedirs(os.path.dirname(self.config.checkpoint_path) or ".", exist_ok=True)
+        checkpoint = {
+            'model_state_dict': self._model.state_dict(),
+            'optimizer_state_dict': self._optimizer.state_dict(),
+            'step_count': self._step_count,
+            'epsilon': self._epsilon,
+            'games_played': self._games_played,
+            'metrics': self._metrics.get_summary(),
+        }
+        torch.save(checkpoint, self.config.checkpoint_path)
+        logger.info(f"Saved checkpoint at step {self._step_count}")
 
     async def run(self):
         logger.info(f"Connection agent to game engine at {agent_uri}")
@@ -129,28 +246,18 @@ class DQNTrainer:
     async def _on_game_tick(self, tick_number: int, game_state_: Dict):
         if not self._first_tick_event.is_set():
             logger.info(
-                f"--------------------- Game {self._games_played + 1} ----------------------"
-            )
-            logger.debug(
-                f"First tick ({tick_number=}) received for game {self._games_played + 1}, setting first_tick_event"
+                f"========== Game {self._games_played + 1} =========="
             )
             self._first_tick_event.set()
-
-        logger.debug(f"Step={self._step_count}, {tick_number=}")
 
         self._step_count += 1
 
         game_state = TypedGameState.from_dict(game_state_)
 
         my_units_sorted = sorted([unit.unit_id for unit in game_state.my_units])
-        logger.debug(f"{my_units_sorted=}")
 
         frame = self._feature_builder.encode_frame(game_state)
         stacked_state = self._feature_builder.update_frame_stack(frame)
-
-        logger.debug(
-            f"frame.shape={frame.shape}, stacked_state.shape={stacked_state.shape}"
-        )
 
         if self._prev_game_state is not None:
             team_reward, units_reward, is_episode_done = (
@@ -158,12 +265,7 @@ class DQNTrainer:
                     self._prev_game_state, game_state, self._last_action
                 )
             )
-            _units_rewards_str = (
-                "{" + ", ".join(f"{k}: {v:.3f}" for k, v in units_reward.items()) + "}"
-            )
-            logger.debug(
-                f"Step={self._step_count}, {team_reward=:.3f}, units_reward={_units_rewards_str}, {is_episode_done=}"
-            )
+            self._metrics.add_step_reward(team_reward)
         else:
             team_reward, units_reward, is_episode_done = 0.0, {}, False
 
@@ -175,11 +277,7 @@ class DQNTrainer:
                 head_index = self._feature_builder.unit_id_to_head_index(
                     unit_id, my_units_sorted
                 )
-                logger.debug(f"{unit_id=}, {head_index=}")
                 if head_index is None:
-                    logger.error(
-                        f"Head index for unit {unit_id} is None, dropping cached transition"
-                    )
                     self._last_state.pop(unit_id, None)
                     self._last_action.pop(unit_id, None)
                     self._last_legal_actions.pop(unit_id, None)
@@ -187,40 +285,19 @@ class DQNTrainer:
 
                 last_action = self._last_action.get(unit_id)
                 if last_action is None:
-                    logger.error(
-                        f"Last action for unit {unit_id} missing, dropping cached transition"
-                    )
                     self._last_state.pop(unit_id, None)
                     self._last_action.pop(unit_id, None)
                     self._last_legal_actions.pop(unit_id, None)
                     continue
-                logger.debug(f"{unit_id=}, {last_action=}")
 
                 last_legal_actions = self._last_legal_actions.get(unit_id)
                 if last_legal_actions is None:
-                    logger.error(
-                        f"Last legal actions for unit {unit_id} missing, dropping cached transition"
-                    )
                     self._last_state.pop(unit_id, None)
                     self._last_action.pop(unit_id, None)
                     self._last_legal_actions.pop(unit_id, None)
                     continue
-                logger.debug(f"{unit_id=}, {last_legal_actions=}")
 
                 reward = units_reward.get(unit_id, team_reward)
-
-                if reward == team_reward:
-                    my_alive_units = {
-                        unit.unit_id for unit in game_state.my_alive_units
-                    }
-                    is_unit_alive = (
-                        game_state.get_unit(unit_id) is not None
-                        and game_state.get_unit(unit_id) in my_alive_units
-                    )
-                    logger.warning(
-                        f"Unit {unit_id} has no individual reward, using team reward {team_reward}. Unit is alive: {is_unit_alive}."
-                    )
-                logger.debug(f"{unit_id=}, {reward=}")
 
                 next_unit_state = game_state.get_unit(unit_id)
                 legal_actions_mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
@@ -248,13 +325,14 @@ class DQNTrainer:
                     self._last_state.pop(unit_id, None)
                     self._last_action.pop(unit_id, None)
 
+        # Get Q-values for action selection
         state_tensor = (
             torch.from_numpy(stacked_state).float().unsqueeze(0).to(self.config.device)
         )
-        self._model.eval()
         with torch.no_grad():
             q_values = self._model(state_tensor)[0].cpu().numpy()
-        self._model.train()
+            # Track Q-values for monitoring
+            self._metrics.add_q_value(float(np.mean(q_values)))
 
         agent_bombs_in_play = len(game_state.my_units_bombs())
         pending_bomb_placements = 0
@@ -267,7 +345,6 @@ class DQNTrainer:
             head_index = self._feature_builder.unit_id_to_head_index(
                 unit_id, my_units_sorted
             )
-            logger.debug(f"{unit_id=}, {head_index=}")
             if head_index is None:
                 continue
 
@@ -301,31 +378,22 @@ class DQNTrainer:
             self._train_step()
 
             if self._step_count % self.config.target_update_interval == 0:
-                logger.debug(f"Updating target network at step {self._step_count}")
+                logger.info(f"Updating target network at step {self._step_count}")
                 self._target_model.load_state_dict(self._model.state_dict())
+
             if self._step_count % self.config.save_interval == 0:
-                logger.info(
-                    f"Saving model checkpoint at step {self._step_count} to {self.config.checkpoint_path}"
-                )
-                self._model.save(self.config.checkpoint_path)
+                self._save_checkpoint()
 
             # update epsilon
             if (
                 self._epsilon > self.config.epsilon_min
                 and len(self._replay_buffer) > self.config.warmup_steps
             ):
-                new_epsilon = max(
+                self._epsilon = max(
                     self.config.epsilon_min,
                     self._epsilon * self.config.epsilon_decay,
                 )
-                logger.debug(
-                    f"Updating epsilon from {self._epsilon} to {new_epsilon} at step {self._step_count}"
-                )
-                self._epsilon = new_epsilon
 
-        logger.debug(
-            "Updating previous game state with current game state for next tick"
-        )
         self._prev_game_state = game_state
 
         # should happen in _on_endgame, but just in case
@@ -333,7 +401,6 @@ class DQNTrainer:
             self._last_state.clear()
             self._last_action.clear()
 
-        logger.debug("Requesting next game tick")
         await self.admin_client.send_request_tick()
 
     def _train_step(self) -> None:
@@ -343,9 +410,6 @@ class DQNTrainer:
             # not warmed up yet
             or len(self._replay_buffer) < self.config.warmup_steps
         ):
-            logger.debug(
-                f"Skipping training step; len(replay_buffer)={len(self._replay_buffer)}, batch_size={self.config.batch_size}, warmup_steps={self.config.warmup_steps}"
-            )
             return
 
         batch = self._replay_buffer.sample(self.config.batch_size)
@@ -372,6 +436,7 @@ class DQNTrainer:
         predicted_q = q_values[batch_indices, head_index_batch, action_batch]
 
         with torch.no_grad():
+            # Double DQN: use online network to select actions, target to evaluate
             q_next_online = self._model(next_state_batch)
             q_next_online_head = q_next_online[batch_indices, head_index_batch]
             masked_q_next_online = q_next_online_head.masked_fill(
@@ -389,41 +454,65 @@ class DQNTrainer:
                 reward_batch + (1.0 - done_batch) * self.config.gamma * next_q_values
             )
 
+        # Huber loss for stability
         loss = F.smooth_l1_loss(predicted_q, target_values)
+
+        # Track TD error for metrics
+        with torch.no_grad():
+            td_error = torch.abs(predicted_q - target_values).mean().item()
+            self._metrics.add_td_error(td_error)
+
         self._optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self._model.parameters(), 1.0)
+        # Gradient clipping for stability
+        torch.nn.utils.clip_grad_norm_(self._model.parameters(), max_norm=10.0)
         self._optimizer.step()
 
-        if self._step_count % 100 == 0:
-            logger.info(
-                f"Step={self._step_count}, loss={loss.item():.6f}, epsilon={self._epsilon:.3f}, replay_buffer_size={len(self._replay_buffer)}",
-            )
+        self._metrics.add_loss(loss.item())
+
+        if self._step_count % self.config.log_interval == 0:
+            self._log_progress()
+
+    def _log_progress(self):
+        """Log training progress with comprehensive metrics."""
+        elapsed = time.time() - self._training_start_time
+        steps_per_sec = self._step_count / elapsed if elapsed > 0 else 0
+
+        metrics = self._metrics.get_summary()
+
+        logger.info(
+            f"Step {self._step_count:,} | "
+            f"Games {self._games_played} | "
+            f"ε {self._epsilon:.4f} | "
+            f"Loss {metrics['avg_loss_1000']:.6f} | "
+            f"Q {metrics['avg_q_1000']:.3f} | "
+            f"TD {metrics['avg_td_error_1000']:.4f} | "
+            f"WinRate {metrics['win_rate_100']:.1%} | "
+            f"AvgReward {metrics['avg_reward_100']:.3f} | "
+            f"AvgLen {metrics['avg_length_100']:.0f} | "
+            f"Buffer {len(self._replay_buffer):,} | "
+            f"Steps/s {steps_per_sec:.1f}"
+        )
+
+        # Update LR scheduler based on win rate
+        if self._games_played >= 100:
+            self._scheduler.step(metrics['win_rate_100'])
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
         """Select action using epsilon-greedy with legal action masking."""
         if not legal_actions:
-            logger.warning("No legal actions available, defaulting to NOOP")
             return ActionType.NOOP.value
 
-        if (random_value := random.random()) < self._epsilon:
-            logger.debug(
-                f"Selecting random legal action due to {random_value=} < epsilon={self._epsilon:.3f} from {legal_actions=}",
-            )
+        if random.random() < self._epsilon:
             return random.choice(legal_actions)
-        logger.debug(f"Selecting greedy action from {legal_actions=}")
         return max(legal_actions, key=lambda idx: q_values[idx])
 
     async def _execute_action(
         self, unit_id: str, action_type: ActionType, game_state: TypedGameState
     ) -> None:
-        logger.debug(f"Executing action {action_type} for unit {unit_id}")
         action_packet = action_type.to_action_packet(unit_id, game_state)
         if isinstance(action_packet, SkipAction):
-            logger.debug(f"Skipping action for unit {unit_id}, because {action_type=}")
             return
-        else:
-            logger.debug(f"Sending action packet for {action_type=} for unit {unit_id}")
         await self.agent_client._send(action_packet.to_dict())
 
     async def _on_endgame(self, *args, **kwargs) -> None:
@@ -432,50 +521,78 @@ class DQNTrainer:
         game_id = payload.get("game_id")
         if game_id is None:
             game_id = payload.get("initial_state", {}).get("game_id")
-        logger.info(f"Endgame received for {game_id=}")
         if game_id is not None and game_id == self._last_endgame_game_id:
-            logger.warning(f"Duplicate endgame event ignored for {game_id=}")
             return
-        # ---
 
         self._games_played += 1
+
+        # Determine win/loss/draw
+        win = None
+        if self._prev_game_state is not None:
+            my_alive = len(self._prev_game_state.my_alive_units)
+            enemy_alive = len(self._prev_game_state.enemy_alive_units)
+            if my_alive > enemy_alive:
+                win = True
+            elif enemy_alive > my_alive:
+                win = False
+            # else: draw, win stays None
+
+        self._metrics.end_game(win)
+
+        win_str = "WIN" if win is True else ("LOSS" if win is False else "DRAW")
         logger.info(
-            f"Step={self._step_count}, Game {self._games_played} lasted for {self._prev_game_state.tick if self._prev_game_state else 0} ticks."
+            f"Game {self._games_played} ended: {win_str} | "
+            f"Length: {self._metrics.current_game_length} | "
+            f"Reward: {self._metrics.current_game_reward:.3f}"
         )
-        logger.info(
-            f"---------------------- End of Game {self._games_played} ----------------------"
-        )
+
         self._feature_builder.reset_stack()
         self._last_state.clear()
         self._last_action.clear()
         self._prev_game_state = None
         if game_id is not None:
             self._last_endgame_game_id = game_id
+
+        # Check if we've reached max steps
+        if self._step_count >= self.config.max_steps:
+            logger.info(f"Reached max steps ({self.config.max_steps}). Stopping training.")
+            self._save_checkpoint()
+            raise SystemExit(0)
+
         world_seed = random.randint(0, 2**31 - 1)
-        logger.info(f"Starting new game with world seed {world_seed}")
         await self.admin_client.send_request_game_reset(world_seed=world_seed)
-        # reset _first_tick_event to wait for the next game start
         self._first_tick_event.clear()
 
     async def _ensure_first_tick(self) -> None:
-        # Initial request_tick can be ignored if the game hasn't started yet.
         while not self._first_tick_event.is_set():
             await self.admin_client.send_request_tick()
             await asyncio.sleep(1)
 
 
 def main() -> None:
-    for _ in range(0, 10):
-        while True:
-            try:
-                trainer = DQNTrainer()
-                asyncio.run(trainer.run())
+    logger.info("=" * 60)
+    logger.info("DQN Training Starting")
+    logger.info("=" * 60)
 
-            except Exception as exc:
-                logger.error("Trainer error: %s", exc)
-                time.sleep(5)
-                continue
+    retries = 0
+    max_retries = 10
+
+    while retries < max_retries:
+        try:
+            trainer = DQNTrainer()
+            asyncio.run(trainer.run())
             break
+        except SystemExit:
+            logger.info("Training completed successfully.")
+            break
+        except Exception as exc:
+            retries += 1
+            logger.error(f"Trainer error (attempt {retries}/{max_retries}): {exc}")
+            if retries < max_retries:
+                time.sleep(5)
+            else:
+                logger.error("Max retries reached. Exiting.")
+                raise
 
 
 if __name__ == "__main__":

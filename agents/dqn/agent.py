@@ -36,13 +36,8 @@ class DQNAgent:
     def __init__(self) -> None:
         self.agent_client = GameState(agent_uri)
 
-        self.config = DQNConfig(
-            epsilon_decay=0.99995,
-            learning_rate=0.0001,
-            target_update_interval=1000,
-            batch_size=512,
-            replay_capacity=50_000,
-        )
+        # Use default config for inference
+        self.config = DQNConfig()
         logger.info(f"config={self.config}")
 
         self._feature_builder = DQNFeatureBuilder(self.config)
@@ -90,8 +85,18 @@ class DQNAgent:
                 raise FileNotFoundError(
                     f"Expected model checkpoint at {self.config.load_path}"
                 )
-            self._model.load(self.config.load_path)
-            logger.info("Loaded checkpoint from %s", self.config.load_path)
+            # Load checkpoint - handle both old and new format
+            checkpoint = torch.load(
+                self.config.load_path,
+                map_location=self.config.device,
+                weights_only=True,
+            )
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                self._model.load_state_dict(checkpoint['model_state_dict'])
+                logger.info(f"Loaded model from checkpoint (step {checkpoint.get('step_count', '?')})")
+            else:
+                self._model.load_state_dict(checkpoint)
+                logger.info("Loaded model weights (legacy format)")
             self._model.eval()
 
         frame = self._feature_builder.encode_frame(game_state)

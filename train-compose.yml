@@ -1,0 +1,75 @@
+services:
+    game-engine:
+        extends:
+            file: base-compose.yml
+            service: game-engine
+        ports:
+            - 3002:3000
+        environment:
+            # Training mode - agent controls tick rate
+            - TRAINING_MODE_ENABLED=1
+            - ADMIN_ROLE_ENABLED=1
+            - AGENT_ID_MAPPING=agentA,agentB
+
+            # Game settings
+            - INITIAL_HP=3
+            - GAME_DURATION_TICKS=200
+            - FIRE_SPAWN_INTERVAL_TICKS=2
+
+            # Disable UI and replays for speed
+            - UI_ENABLED=0
+            - SAVE_REPLAY_ENABLED=0
+            - TELEMETRY_ENABLED=0
+
+            # Random seeds for diverse training
+            - PRNG_SEED=0
+            - WORLD_SEED=0
+
+            # Fast shutdown on game end (we'll reset via admin)
+            - SHUTDOWN_ON_GAME_END_ENABLED=0
+        deploy:
+            resources:
+                limits:
+                    cpus: "2"
+                    memory: "2048M"
+        networks:
+            - coderone-tournament
+
+    # DQN Training Agent
+    agent-a:
+        extends:
+            file: base-compose.yml
+            service: dqn-train
+        environment:
+            - GAME_CONNECTION_STRING=ws://game-engine:3000/?role=agent&agentId=agentA&name=dqn-train
+            - TRAINING_MODE_ENABLED=1
+            # Set DEBUG=1 for verbose logging
+            - DEBUG=0
+        depends_on:
+            - game-engine
+        gpus: all
+        volumes:
+            - ./agents/dqn:/app
+            - ./agents/dqn/checkpoints:/app/checkpoints
+        networks:
+            - coderone-tournament
+
+    # Opponent: simple bot for curriculum learning
+    agent-b:
+        extends:
+            file: base-compose.yml
+            service: bombwalker
+        environment:
+            - GAME_CONNECTION_STRING=ws://game-engine:3000/?role=agent&agentId=agentB&name=bombwalker
+        depends_on:
+            - game-engine
+        deploy:
+            resources:
+                limits:
+                    cpus: "1"
+                    memory: "512M"
+        networks:
+            - coderone-tournament
+
+networks:
+    coderone-tournament:
