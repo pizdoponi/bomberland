@@ -120,7 +120,6 @@ class DQNTrainer:
         await asyncio.gather(admin_task, agent_task, kickoff_task)
 
     async def _on_game_tick(self, tick_number: int, game_state_: Dict):
-        logger.debug(f"Step={self._step_count}, {tick_number=}")
         if not self._first_tick_event.is_set():
             logger.info(
                 f"--------------------- Game {self._games_played + 1} ----------------------"
@@ -129,6 +128,8 @@ class DQNTrainer:
                 f"First tick ({tick_number=}) received for game {self._games_played + 1}, setting first_tick_event"
             )
             self._first_tick_event.set()
+
+        logger.debug(f"Step={self._step_count}, {tick_number=}")
 
         self._step_count += 1
 
@@ -150,13 +151,12 @@ class DQNTrainer:
                     self._prev_game_state, game_state, self._last_action
                 )
             )
-            logger.debug(
-                f"Computed rewards: {team_reward=}, {units_reward=}, {is_episode_done=}"
+            _units_rewards_str = (
+                "{" + ", ".join(f"{k}: {v:.3f}" for k, v in units_reward.items()) + "}"
             )
-            if self._step_count % 20 == 0:
-                logger.info(
-                    f"Step={self._step_count}, {team_reward=}, {units_reward=}, {is_episode_done=}"
-                )
+            logger.debug(
+                f"Step={self._step_count}, {team_reward=:.3f}, units_reward={_units_rewards_str}, {is_episode_done=}"
+            )
         else:
             team_reward, units_reward, is_episode_done = 0.0, {}, False
 
@@ -298,6 +298,9 @@ class DQNTrainer:
                 )
                 self._epsilon = new_epsilon
 
+        logger.debug(
+            "Updating previous game state with current game state for next tick"
+        )
         self._prev_game_state = game_state
 
         # should happen in _on_endgame, but just in case
@@ -305,6 +308,7 @@ class DQNTrainer:
             self._last_state.clear()
             self._last_action.clear()
 
+        logger.debug("Requesting next game tick")
         await self.admin_client.send_request_tick()
 
     def _train_step(self) -> None:
@@ -368,7 +372,7 @@ class DQNTrainer:
 
         if self._step_count % 100 == 0:
             logger.info(
-                f"Step={self._step_count}, loss={loss.item():.6f}, epsilon={self._epsilon:.3f}",
+                f"Step={self._step_count}, loss={loss.item():.6f}, epsilon={self._epsilon:.3f}, replay_buffer_size={len(self._replay_buffer)}",
             )
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
@@ -399,11 +403,12 @@ class DQNTrainer:
 
     async def _on_endgame(self, *args, **kwargs) -> None:
         self._games_played += 1
-        logger.info(f"games_played={self._games_played}")
         logger.info(
-            f"Step={self._step_count}, Endgame received, resetting trainer state. Game lasted for {self._prev_game_state.tick if self._prev_game_state else 0} ticks."
+            f"Step={self._step_count}, Game {self._games_played} lasted for {self._prev_game_state.tick if self._prev_game_state else 0} ticks."
         )
-        logger.info(f"{args=}, {kwargs=}")
+        logger.info(
+            f"---------------------- End of Game {self._games_played} ----------------------"
+        )
         self._feature_builder.reset_stack()
         self._last_state.clear()
         self._last_action.clear()
