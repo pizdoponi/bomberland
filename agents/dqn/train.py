@@ -56,6 +56,7 @@ class DQNTrainer:
         self._last_action: Dict[str, ActionType] = {}
         self._last_legal_actions: Dict[str, List[int]] = {}
         self._prev_game_state: Optional[TypedGameState] = None
+        self._last_endgame_game_id: Optional[str] = None
 
         self._step_count = 0
         self._first_tick_event = asyncio.Event()
@@ -420,6 +421,17 @@ class DQNTrainer:
         await self.agent_client._send(action_packet.to_dict())
 
     async def _on_endgame(self, *args, **kwargs) -> None:
+        # ignore duplicate endgame events sent by the game engine
+        payload = args[0] if args else {}
+        game_id = payload.get("game_id")
+        if game_id is None:
+            game_id = payload.get("initial_state", {}).get("game_id")
+        logger.info(f"Endgame received for {game_id=}")
+        if game_id is not None and game_id == self._last_endgame_game_id:
+            logger.warning(f"Duplicate endgame event ignored for {game_id=}")
+            return
+        # ---
+
         self._games_played += 1
         logger.info(
             f"Step={self._step_count}, Game {self._games_played} lasted for {self._prev_game_state.tick if self._prev_game_state else 0} ticks."
@@ -431,6 +443,8 @@ class DQNTrainer:
         self._last_state.clear()
         self._last_action.clear()
         self._prev_game_state = None
+        if game_id is not None:
+            self._last_endgame_game_id = game_id
         world_seed = random.randint(0, 2**31 - 1)
         logger.info(f"Starting new game with world seed {world_seed}")
         await self.admin_client.send_request_game_reset(world_seed=world_seed)
