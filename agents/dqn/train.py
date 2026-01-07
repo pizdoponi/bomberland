@@ -50,10 +50,6 @@ class DQNTrainer:
         self._epsilon = self.config.epsilon_start
 
         self._feature_builder = DQNFeatureBuilder(self.config)
-
-        self._model: DQNModel = None  # pyright: ignore[reportAttributeAccessIssue]
-        self._target_model: DQNModel = None  # pyright: ignore[reportAttributeAccessIssue]
-        self._optimizer: AdamW = None  # pyright: ignore[reportAttributeAccessIssue]
         self._replay_buffer = ReplayBuffer(self.config.replay_capacity)
 
         self._last_state: Dict[str, np.ndarray] = {}
@@ -64,6 +60,43 @@ class DQNTrainer:
         self._first_tick_event = asyncio.Event()
 
         self._games_played = 0
+
+        in_channels = self._feature_builder.num_channels * self.config.frame_stack_size
+        self._model = DQNModel(
+            conv_in_channels=in_channels,
+            conv_hidden_channels=self.config.conv_hidden_channels,
+            conv_out_channels=self.config.conv_out_channels,
+            height=15,
+            width=15,
+            num_heads=self._feature_builder.num_heads,
+            num_actions=NUM_ACTIONS,
+            fc_hidden_dim=self.config.fc_hidden_dim,
+        ).to(self.config.device)
+
+        self._target_model = DQNModel(
+            conv_in_channels=in_channels,
+            conv_hidden_channels=self.config.conv_hidden_channels,
+            conv_out_channels=self.config.conv_out_channels,
+            height=15,
+            width=15,
+            num_heads=self._feature_builder.num_heads,
+            num_actions=NUM_ACTIONS,
+            fc_hidden_dim=self.config.fc_hidden_dim,
+        ).to(self.config.device)
+
+        self._optimizer = AdamW(self._model.parameters(), lr=self.config.learning_rate)
+
+        has_checkpoint = os.path.exists(self.config.load_path)
+        if has_checkpoint:
+            self._model.load(self.config.load_path)
+            logger.info("Loaded checkpoint from %s", self.config.load_path)
+        else:
+            logger.info(
+                f"No checkpoint found at {self.config.load_path}, training from scratch"
+            )
+
+        # Always start with a fresh target equal to the online network.
+        self._target_model.load_state_dict(self._model.state_dict())
 
     async def run(self):
         logger.info(f"Connection agent to game engine at {agent_uri}")
@@ -102,44 +135,6 @@ class DQNTrainer:
 
         my_units_sorted = sorted([unit.unit_id for unit in game_state.my_units])
         logger.debug(f"{my_units_sorted=}")
-
-        if self._model is None:
-            in_channels = (
-                self._feature_builder.num_channels * self.config.frame_stack_size
-            )
-            self._model = DQNModel(
-                conv_in_channels=in_channels,
-                conv_hidden_channels=self.config.conv_hidden_channels,
-                conv_out_channels=self.config.conv_out_channels,
-                height=game_state.world.height,
-                width=game_state.world.width,
-                num_heads=self._feature_builder.num_heads,
-                num_actions=NUM_ACTIONS,
-                fc_hidden_dim=self.config.fc_hidden_dim,
-            ).to(self.config.device)
-            self._target_model = DQNModel(
-                conv_in_channels=in_channels,
-                conv_hidden_channels=self.config.conv_hidden_channels,
-                conv_out_channels=self.config.conv_out_channels,
-                height=game_state.world.height,
-                width=game_state.world.width,
-                num_heads=self._feature_builder.num_heads,
-                num_actions=NUM_ACTIONS,
-                fc_hidden_dim=self.config.fc_hidden_dim,
-            ).to(self.config.device)
-            self._optimizer = AdamW(
-                self._model.parameters(), lr=self.config.learning_rate
-            )
-            has_checkpoint = os.path.exists(self.config.load_path)
-            if has_checkpoint:
-                self._model.load(self.config.load_path)
-                logger.info("Loaded checkpoint from %s", self.config.load_path)
-            else:
-                logger.info(
-                    f"No checkpoint found at {self.config.load_path}, training from scratch"
-                )
-            # Always start with a fresh target equal to the online network.
-            self._target_model.load_state_dict(self._model.state_dict())
 
         frame = self._feature_builder.encode_frame(game_state)
         stacked_state = self._feature_builder.update_frame_stack(frame)
