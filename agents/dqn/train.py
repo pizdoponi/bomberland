@@ -291,10 +291,10 @@ class DQNTrainer:
             ):
                 new_epsilon = max(
                     self.config.epsilon_min,
-                    self.config.epsilon_start * self.config.epsilon_decay,
+                    self._epsilon * self.config.epsilon_decay,
                 )
                 logger.debug(
-                    f"Updating epsilon from {self.config.epsilon_start} to {new_epsilon} at step {self._step_count}"
+                    f"Updating epsilon from {self._epsilon} to {new_epsilon} at step {self._step_count}"
                 )
                 self._epsilon = new_epsilon
 
