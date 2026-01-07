@@ -23,6 +23,12 @@ MOVE_BY_ACTION = {
     ActionType.LEFT: "left",
 }
 
+DETONATION_INDEX_BY_ACTION = {
+    ActionType.DETONATE_BOMB_0: 0,
+    ActionType.DETONATE_BOMB_1: 1,
+    ActionType.DETONATE_BOMB_2: 2,
+}
+
 
 class DQNFeatureBuilder:
     def __init__(self, config: DQNConfig):
@@ -157,7 +163,9 @@ class DQNFeatureBuilder:
         my_deaths = max(0, prev_my_alive - curr_my_alive)
 
         # Scale to keep values stable
-        hp_term = 0.10 * ((enemy_hp_lost - my_hp_lost) / 9.0)  # 9 = 3 units * 3 HP
+        enemy_hp_reward = 0.10 * (enemy_hp_lost / 9.0)  # 9 = 3 units * 3 HP
+        my_hp_penalty = 0.20 * (my_hp_lost / 9.0)
+        hp_term = enemy_hp_reward - my_hp_penalty
         death_term = 0.30 * ((enemy_deaths - my_deaths) / 3.0)  # 3 units per agent
 
         step_penalty = 0.0 if done else -0.001
@@ -184,10 +192,19 @@ class DQNFeatureBuilder:
             if action == ActionType.NOOP:
                 return -0.001
             if action == ActionType.PLACE_BOMB:
-                return 0.1
+                return 0.002
             if action.is_bomb_detonation():
+                bomb_index = DETONATION_INDEX_BY_ACTION.get(action)
+                if bomb_index is None:
+                    return 0.0
+                detonated_bombs = prev_game_state.my_units_bombs(
+                    unit_id=unit.unit_id, bomb_idx=bomb_index
+                )
+                if not detonated_bombs:
+                    return 0.0
                 blast_tiles = prev_game_state.get_blast_tiles_if_detonated(
-                    unit.position
+                    detonated_bombs[0].position,
+                    require_armed=False,
                 )
                 blocks_hit = sum(
                     1
@@ -211,15 +228,16 @@ class DQNFeatureBuilder:
             action = actions_taken.get(unit.unit_id)
             if action is None:
                 return 0.0
+            previous_unit_state = prev_game_state.get_unit(unit.unit_id) or unit
             if action.is_movement():
                 dx, dy = MOVE_DELTAS[action]
-                new_x = unit.x + dx
-                new_y = unit.y + dy
+                new_x = previous_unit_state.x + dx
+                new_y = previous_unit_state.y + dy
                 if curr_game_state.is_dangerous_tile(new_x, new_y):
                     return 0.3
             if action.is_bomb_detonation() and (curr_my_hp < prev_my_hp):
                 # you don't detonate bombs if it hurts you stoopid
-                return 1
+                return 1.0
             return 0.0
 
         # Potential: higher is better
