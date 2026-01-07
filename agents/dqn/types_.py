@@ -777,9 +777,13 @@ class GameState:
             if entity.entity_type == EntityType.BOMB
             and entity.owner_unit_id in agent_unit_ids
         ]
+        bomb_already_placed_here = any(
+            bomb.position.x == unit.x and bomb.position.y == unit.y for bomb in agent_bombs
+        )
         if (
             unit.inventory.bombs > 0
             and len(agent_bombs) < MAX_CONCURRENT_BOMBS_PER_AGENT
+            and not bomb_already_placed_here
         ):
             actions.append(ActionType.PLACE_BOMB)
 
