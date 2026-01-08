@@ -14,12 +14,16 @@ class GameState:
         self._state = None
         self._tick_callback = None
         self._endgame_callback = None
+        self._game_state_callback = None
 
     def set_game_tick_callback(self, generate_agent_action_callback):
         self._tick_callback = generate_agent_action_callback
 
     def set_endgame_callback(self, endgame_callback):
         self._endgame_callback = endgame_callback
+
+    def set_game_state_callback(self, game_state_callback):
+        self._game_state_callback = game_state_callback
 
     async def connect(self):
         self.connection = await websockets.connect(self._connection_string)
@@ -92,6 +96,8 @@ class GameState:
 
     def _on_game_state(self, game_state):
         self._state = game_state
+        if self._game_state_callback is not None:
+            self._game_state_callback(game_state)
 
     async def _on_game_tick(self, game_tick):
         events = game_tick.get("events")

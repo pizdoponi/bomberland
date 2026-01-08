@@ -232,6 +232,7 @@ class DQNTrainer:
 
         self.agent_client.set_game_tick_callback(self._on_game_tick)
         self.admin_client.set_endgame_callback(self._on_endgame)
+        self.admin_client.set_game_state_callback(self._on_game_state_reset)
 
         admin_task = asyncio.create_task(
             self.admin_client._handle_messages(admin_connection)  # type: ignore
@@ -244,17 +245,25 @@ class DQNTrainer:
         logger.info("Creating admin, agent, and kickoff tasks")
         await asyncio.gather(admin_task, agent_task, kickoff_task)
 
+    def _on_game_state_reset(self, game_state: Dict) -> None:
+        """Called when we receive a game_state message, which indicates the game has reset."""
+        if self._awaiting_reset:
+            logger.info("Received game_state, clearing _awaiting_reset flag")
+            self._awaiting_reset = False
+
     async def _on_game_tick(self, tick_number: int, game_state_: Dict):
         # If we're awaiting a game reset, ignore stale ticks from the old game
-        # A new game should start at tick 1
         if self._awaiting_reset:
             if tick_number > 1:
-                # This is a stale tick from the old game, ignore it but still request next tick
+                # This is a stale tick from the old game, ignore it completely.
+                # Do NOT request another tick - that would cause the engine to
+                # broadcast endgame_state again since the game is still complete.
+                # The _ensure_first_tick task will handle kicking off the new game
+                # once _awaiting_reset is cleared by _on_game_state_reset.
                 logger.debug(f"Ignoring stale tick {tick_number} while awaiting reset")
-                await self.admin_client.send_request_tick()
                 return
             else:
-                # tick_number == 1 means the game has reset
+                # tick_number == 1 means the game has reset (fallback if game_state wasn't received)
                 logger.info(f"Game reset detected at tick {tick_number}")
                 self._awaiting_reset = False
 
@@ -585,7 +594,10 @@ class DQNTrainer:
 
     async def _ensure_first_tick(self) -> None:
         while not self._first_tick_event.is_set():
-            await self.admin_client.send_request_tick()
+            # Don't request ticks while awaiting reset - the game is still complete
+            # and requesting ticks would just flood the engine with endgame messages
+            if not self._awaiting_reset:
+                await self.admin_client.send_request_tick()
             await asyncio.sleep(1)
 
 
