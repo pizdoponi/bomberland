@@ -553,6 +553,17 @@ class DQNTrainer:
         await self.agent_client._send(action_packet.to_dict())
 
     async def _on_endgame(self, *args, **kwargs) -> None:
+        """Handle endgame - schedule reset in a separate task to not block message handling.
+
+        IMPORTANT: This callback runs inside the admin client's message handler loop.
+        If we await here (e.g., waiting for reset confirmation), we block the message
+        handler from receiving the game_state response. So we spawn a separate task.
+        """
+        # Create a task to handle the reset logic so we don't block the message handler
+        asyncio.create_task(self._handle_endgame_reset(*args, **kwargs))
+
+    async def _handle_endgame_reset(self, *args, **kwargs) -> None:
+        """Actually handle the endgame logic in a separate task."""
         # ignore duplicate endgame events sent by the game engine
         payload = args[0] if args else {}
         game_id = payload.get("game_id")
