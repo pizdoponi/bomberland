@@ -120,7 +120,9 @@ class DQNTrainer:
         self._last_endgame_game_id: Optional[str] = None
 
         self._step_count = 0
-        self._first_tick_event = asyncio.Event()
+        # Events will be created in run() to ensure they're in the correct event loop
+        self._first_tick_event: Optional[asyncio.Event] = None
+        self._reset_complete_event: Optional[asyncio.Event] = None
         self._awaiting_reset = False  # Flag to ignore stale ticks after game end
 
         self._games_played = 0
@@ -225,6 +227,10 @@ class DQNTrainer:
         logger.info(f"Saved checkpoint at step {self._step_count}")
 
     async def run(self):
+        # Create events in the async context to ensure they're bound to the correct event loop
+        self._first_tick_event = asyncio.Event()
+        self._reset_complete_event = asyncio.Event()
+
         logger.info(f"Connection agent to game engine at {agent_uri}")
         agent_connection = await self.agent_client.connect()
         logger.info(f"Connection admin to game engine at {admin_uri}")
@@ -250,6 +256,7 @@ class DQNTrainer:
         if self._awaiting_reset:
             logger.info("Received game_state, clearing _awaiting_reset flag")
             self._awaiting_reset = False
+            self._reset_complete_event.set()
 
     async def _on_game_tick(self, tick_number: int, game_state_: Dict):
         # If we're awaiting a game reset, ignore stale ticks from the old game
@@ -266,6 +273,7 @@ class DQNTrainer:
                 # tick_number == 1 means the game has reset (fallback if game_state wasn't received)
                 logger.info(f"Game reset detected at tick {tick_number}")
                 self._awaiting_reset = False
+                self._reset_complete_event.set()  # Signal that reset is complete
 
         if not self._first_tick_event.is_set():
             logger.info(
@@ -587,9 +595,38 @@ class DQNTrainer:
             self._save_checkpoint()
             raise SystemExit(0)
 
-        world_seed = random.randint(0, 2**31 - 1)
-        self._awaiting_reset = True  # Ignore stale ticks until we see tick 1
-        await self.admin_client.send_request_game_reset(world_seed=world_seed)
+        # Request game reset with retry logic - some world seeds fail to generate
+        # Use a smaller seed range to reduce likelihood of world generation failures
+        # Note: If the engine fails to generate a world, it becomes unresponsive and
+        # subsequent retries won't help. The real fix would be in the engine.
+        max_reset_attempts = 10
+        reset_timeout = 5.0  # seconds to wait for reset to complete
+
+        for attempt in range(1, max_reset_attempts + 1):
+            # Use smaller seed range - large seeds seem more likely to fail
+            world_seed = random.randint(1, 1_000_000)
+            self._awaiting_reset = True
+            self._reset_complete_event.clear()
+
+            logger.debug(f"Requesting game reset with seed {world_seed} (attempt {attempt})")
+            await self.admin_client.send_request_game_reset(world_seed=world_seed)
+
+            try:
+                await asyncio.wait_for(
+                    self._reset_complete_event.wait(),
+                    timeout=reset_timeout
+                )
+                # Reset succeeded
+                logger.debug(f"Game reset succeeded with seed {world_seed}")
+                break
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Game reset timed out with seed {world_seed} (attempt {attempt}/{max_reset_attempts})"
+                )
+                if attempt == max_reset_attempts:
+                    logger.error("Max reset attempts reached, continuing anyway")
+                    self._awaiting_reset = False
+
         self._first_tick_event.clear()
 
     async def _ensure_first_tick(self) -> None:
