@@ -234,7 +234,36 @@ export class GameRunner {
         this.api.LogEvent(EngineTelemetryEvent.GameReset, null);
         await this.Stop();
         this.tickCount = 1;
-        this.game = createGameFromSeed(this.telemetry, this.config, worldSeed ?? this.config.WorldSeed, prngSeed ?? this.config.PrngSeed);
+
+        // Try to create game, with retries on world generation failure
+        const maxAttempts = 10;
+        let lastError: Error | undefined;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const seedToUse = worldSeed ?? this.config.WorldSeed;
+            const prngToUse = prngSeed ?? this.config.PrngSeed;
+            try {
+                this.game = createGameFromSeed(this.telemetry, this.config, seedToUse, prngToUse);
+                break; // Success
+            } catch (e) {
+                lastError = e as Error;
+                this.telemetry.Error(`World generation failed with seed ${seedToUse} (attempt ${attempt}/${maxAttempts}): ${lastError.message}`);
+                if (attempt === maxAttempts) {
+                    this.telemetry.Error(`Max world generation attempts reached, using fallback seed`);
+                    // Fallback: try a known-good seed range
+                    const fallbackSeed = 1000 + attempt;
+                    try {
+                        this.game = createGameFromSeed(this.telemetry, this.config, fallbackSeed, fallbackSeed);
+                    } catch (fallbackError) {
+                        this.telemetry.Error(`Fallback seed also failed, engine may be in bad state`);
+                        throw fallbackError;
+                    }
+                } else {
+                    // Try with a different random seed for next attempt
+                    worldSeed = Math.floor(Math.random() * 100000) + 1;
+                    prngSeed = worldSeed;
+                }
+            }
+        }
 
         this.connectionTracker.Connections.forEach((connection) => {
             this.sendGameState(connection);
