@@ -27,6 +27,8 @@ export class CoderOneApi {
                 build: this.build,
                 event,
                 data: payload,
+            }, {
+                timeout: 1000,  // 1 second timeout to avoid blocking on DNS failures
             });
 
             await request;
@@ -51,7 +53,10 @@ export class CoderOneApi {
                     build: this.build,
                     replay: replay,
                 },
-                { headers: { Authorization: `Bearer ${token}` } }
+                {
+                    headers: { Authorization: `Bearer ${token}` },
+                    timeout: 1000,  // 1 second timeout to avoid blocking
+                }
             );
 
             await request;

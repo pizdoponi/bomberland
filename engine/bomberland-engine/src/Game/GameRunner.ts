@@ -84,6 +84,7 @@ export class GameRunner {
 
             await this.telemetry.Engine.LogEvent(EngineTelemetryEvent.GameEnded, { tick: this.tickCount - 1 });
             this.shutdown();
+            return;  // Don't continue processing after game is complete
         }
         const tickResult = await this.game.GetTickResult();
         const tickPacket: GameTickPacket = {
