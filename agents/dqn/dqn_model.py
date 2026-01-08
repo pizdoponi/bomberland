@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import os
 import random
-from collections import deque
 from dataclasses import dataclass
-from typing import Deque, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -38,8 +37,17 @@ class ReplayBufferSample(NamedTuple):
 
 
 class ReplayBuffer:
+    """Circular replay buffer with O(1) random sampling.
+
+    Uses a list-based circular buffer instead of deque for efficient random access.
+    random.sample() on deque is O(k*n) because deque doesn't support random indexing,
+    whereas list-based sampling is O(k).
+    """
     def __init__(self, capacity: int):
-        self._buffer: Deque[Transition] = deque(maxlen=capacity)
+        self._capacity = capacity
+        self._buffer: list[Transition | None] = [None] * capacity
+        self._position = 0
+        self._size = 0
 
     def add(
         self,
@@ -51,20 +59,21 @@ class ReplayBuffer:
         next_legal_actions_mask: np.ndarray,
         done: float,
     ) -> None:
-        self._buffer.append(
-            Transition(
-                state=state,
-                head_index=head_index,
-                action=action,
-                reward=reward,
-                next_state=next_state,
-                next_legal_actions_mask=next_legal_actions_mask,
-                done=done,
-            )
+        self._buffer[self._position] = Transition(
+            state=state,
+            head_index=head_index,
+            action=action,
+            reward=reward,
+            next_state=next_state,
+            next_legal_actions_mask=next_legal_actions_mask,
+            done=done,
         )
+        self._position = (self._position + 1) % self._capacity
+        self._size = min(self._size + 1, self._capacity)
 
     def sample(self, batch_size: int) -> ReplayBufferSample:
-        batch = random.sample(self._buffer, batch_size)
+        indices = random.sample(range(self._size), batch_size)
+        batch = [self._buffer[i] for i in indices]
         states = np.stack([t.state for t in batch])
         head_indices = np.array([t.head_index for t in batch], dtype=np.int64)
         actions = np.array([t.action.value for t in batch], dtype=np.int64)
@@ -85,7 +94,7 @@ class ReplayBuffer:
         )
 
     def __len__(self) -> int:
-        return len(self._buffer)
+        return self._size
 
 
 class ResNetBlock(nn.Module):
