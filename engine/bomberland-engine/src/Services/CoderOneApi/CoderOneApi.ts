@@ -7,7 +7,7 @@ import { IConfig } from "../../Config/IConfig";
 export class CoderOneApi {
     private apiPath: string;
     private launchId = uuidv4();
-    public constructor(private environment: string, private config: IConfig, private isEnabled: boolean, private build: string | number) {
+    public constructor(environment: string, private config: IConfig, private isEnabled: boolean, private build: string | number) {
         this.apiPath = environment === "production" ? "https://www.gocoder.one/api" : "https://www.stage-gocoder.one/api";
         if (process.env.ENGINE_TELEMETRY_STAGE_MODE !== undefined) {
             this.apiPath = "https://www.stage-gocoder.one/api";
@@ -31,9 +31,9 @@ export class CoderOneApi {
 
             await request;
         } catch (e) {
-            if (this.environment !== "production") {
-                throw e;
-            }
+            // Silently ignore telemetry failures - don't let them break the game
+            // (Previously this would throw in non-production, but the staging server
+            // no longer exists and we don't want telemetry failures to crash training)
         }
     };
 
@@ -56,9 +56,7 @@ export class CoderOneApi {
 
             await request;
         } catch (e) {
-            if (this.environment !== "production") {
-                throw e;
-            }
+            // Silently ignore webhook failures - don't let them break the game
         }
     };
 }
