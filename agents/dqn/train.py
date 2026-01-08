@@ -121,6 +121,7 @@ class DQNTrainer:
 
         self._step_count = 0
         self._first_tick_event = asyncio.Event()
+        self._awaiting_reset = False  # Flag to ignore stale ticks after game end
 
         self._games_played = 0
         self._training_start_time = time.time()
@@ -244,6 +245,19 @@ class DQNTrainer:
         await asyncio.gather(admin_task, agent_task, kickoff_task)
 
     async def _on_game_tick(self, tick_number: int, game_state_: Dict):
+        # If we're awaiting a game reset, ignore stale ticks from the old game
+        # A new game should start at tick 1
+        if self._awaiting_reset:
+            if tick_number > 1:
+                # This is a stale tick from the old game, ignore it but still request next tick
+                logger.debug(f"Ignoring stale tick {tick_number} while awaiting reset")
+                await self.admin_client.send_request_tick()
+                return
+            else:
+                # tick_number == 1 means the game has reset
+                logger.info(f"Game reset detected at tick {tick_number}")
+                self._awaiting_reset = False
+
         if not self._first_tick_event.is_set():
             logger.info(
                 f"========== Game {self._games_played + 1} =========="
@@ -565,6 +579,7 @@ class DQNTrainer:
             raise SystemExit(0)
 
         world_seed = random.randint(0, 2**31 - 1)
+        self._awaiting_reset = True  # Ignore stale ticks until we see tick 1
         await self.admin_client.send_request_game_reset(world_seed=world_seed)
         self._first_tick_event.clear()
 
