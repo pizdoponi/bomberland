@@ -1,8 +1,13 @@
 services:
     game-engine:
-        extends:
-            file: base-compose.yml
-            service: game-engine
+        # Build locally instead of using pre-built image to include our fixes
+        build:
+            context: engine
+            dockerfile: bomberland-engine/Dockerfile
+        volumes:
+            - type: "bind"
+              source: ./agents/replay.json
+              target: /app/replay.json
         ports:
             - 3002:3000
         environment:
