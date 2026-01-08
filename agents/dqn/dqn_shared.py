@@ -94,9 +94,6 @@ class DQNFeatureBuilder:
         my_unit_to_channel = {uid: 6 + i for i, uid in enumerate(my_unit_ids[:3])}
         my_unit_id_set = set(my_unit_ids)
 
-        # Collect bombs for danger zone calculation
-        all_bombs: list = []
-
         for entity in game_state.entities:
             x, y = entity.x, entity.y
 
@@ -126,7 +123,6 @@ class DQNFeatureBuilder:
                 frame[9, y, x] = 1.0
 
             elif entity.entity_type == EntityType.BOMB:
-                all_bombs.append(entity)
                 owner = entity.owner_unit_id
                 is_my_bomb = owner in my_unit_id_set
 
@@ -152,8 +148,9 @@ class DQNFeatureBuilder:
                         frame[17, y, x] = 1.0
 
         # Channel 4: Danger zone - tiles that would be hit by any armed bomb
+        # Use cached bomb list instead of collecting during iteration
         danger_tiles: Set[Point] = set()
-        for bomb in all_bombs:
+        for bomb in game_state._all_bombs or []:
             if bomb.is_armed(tick):
                 blast_tiles = game_state.get_blast_tiles_if_detonated(
                     bomb.position, require_armed=False

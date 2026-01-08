@@ -600,6 +600,22 @@ class GameState:
     _blast_tiles_cache: Dict[tuple, Set[Point]] = field(
         default_factory=dict, repr=False
     )
+    # Spatial index: (x, y) -> list of entities at that position
+    _entity_grid: Dict[tuple, List[Entity]] = field(
+        default_factory=dict, repr=False
+    )
+    # Unit position index: (x, y) -> unit at that position
+    _unit_grid: Dict[tuple, UnitState] = field(
+        default_factory=dict, repr=False
+    )
+    # Bomb cache: owner_unit_id -> list of bombs owned by that unit
+    _bombs_by_owner: Dict[str, List[Entity]] = field(
+        default_factory=dict, repr=False
+    )
+    # All bombs cache
+    _all_bombs: Optional[List[Entity]] = field(
+        default=None, repr=False
+    )
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "GameState":
@@ -627,6 +643,30 @@ class GameState:
         connection = Connection.from_dict(data.get("connection", {}))
         tick = int(data.get("tick", 0))
 
+        # Build spatial index for O(1) entity lookups
+        entity_grid: Dict[tuple, List[Entity]] = {}
+        bombs_by_owner: Dict[str, List[Entity]] = {}
+        all_bombs: List[Entity] = []
+        for e in entities:
+            key = (e.x, e.y)
+            if key not in entity_grid:
+                entity_grid[key] = []
+            entity_grid[key].append(e)
+
+            # Build bomb indices
+            if e.entity_type == EntityType.BOMB:
+                all_bombs.append(e)
+                owner = e.owner_unit_id
+                if owner is not None:
+                    if owner not in bombs_by_owner:
+                        bombs_by_owner[owner] = []
+                    bombs_by_owner[owner].append(e)
+
+        # Build unit position index
+        unit_grid: Dict[tuple, UnitState] = {}
+        for u in units.values():
+            unit_grid[(u.x, u.y)] = u
+
         return cls(
             agents=agents,
             units=units,
@@ -635,6 +675,10 @@ class GameState:
             tick=tick,
             config=config,
             connection=connection,
+            _entity_grid=entity_grid,
+            _unit_grid=unit_grid,
+            _bombs_by_owner=bombs_by_owner,
+            _all_bombs=all_bombs,
         )
 
     # ------------- Agent-centric helpers -------------
@@ -716,6 +760,8 @@ class GameState:
             List of Entity objects corresponding to bombs placed by my units.
             The list is empty if no such bombs exist (if requesting bomb at idx 2 for unit that only placed
                 one bomb, the return is also an empty list).
+
+        Uses bomb cache for O(1) lookup per unit instead of O(n) entity iteration.
         """
         assert bomb_idx is None or bomb_idx in {0, 1, 2}, (
             "bomb_idx must be one of {0, 1, 2} if provided"
@@ -724,14 +770,14 @@ class GameState:
             "bomb_idx can only be used when unit_id is provided"
         )
 
-        my_unit_ids = (
-            {unit_id} if unit_id is not None else {u.unit_id for u in self.my_units}
-        )
-        my_units_bombs = [
-            e
-            for e in self.entities
-            if e.entity_type == EntityType.BOMB and e.owner_unit_id in my_unit_ids
-        ]
+        # Use cached bomb lookup instead of iterating all entities
+        if unit_id is not None:
+            my_units_bombs = self._bombs_by_owner.get(unit_id, []).copy()
+        else:
+            my_unit_ids = {u.unit_id for u in self.my_units}
+            my_units_bombs = []
+            for uid in my_unit_ids:
+                my_units_bombs.extend(self._bombs_by_owner.get(uid, []))
 
         if bomb_idx is not None:
             # Sort bombs by creation tick to determine order
@@ -765,24 +811,25 @@ class GameState:
             if self.is_walkable(new_x, new_y, ignore_units=False):
                 actions.append(direction)
 
-        # Bomb placement
+        # Bomb placement - use spatial index for O(1) check
         agent_unit_ids = {
             unit_state.unit_id
             for unit_state in self.units.values()
             if unit_state.agent_id == unit.agent_id
         }
-        agent_bombs = [
-            entity
-            for entity in self.entities
-            if entity.entity_type == EntityType.BOMB
-            and entity.owner_unit_id in agent_unit_ids
-        ]
+        # Count agent bombs using cached bomb lookup - O(k) where k = num agents
+        agent_bomb_count = sum(
+            len(self._bombs_by_owner.get(uid, []))
+            for uid in agent_unit_ids
+        )
+        # O(1) check if bomb already at unit's position
+        entities_at_unit = self._entity_grid.get((unit.x, unit.y), [])
         bomb_already_placed_here = any(
-            bomb.position.x == unit.x and bomb.position.y == unit.y for bomb in agent_bombs
+            e.entity_type == EntityType.BOMB for e in entities_at_unit
         )
         if (
             unit.inventory.bombs > 0
-            and len(agent_bombs) < MAX_CONCURRENT_BOMBS_PER_AGENT
+            and agent_bomb_count < MAX_CONCURRENT_BOMBS_PER_AGENT
             and not bomb_already_placed_here
         ):
             actions.append(ActionType.PLACE_BOMB)
@@ -822,12 +869,14 @@ class GameState:
             Coordinate of interest.
         types:
             Optional iterable of EntityType values to filter by.
+
+        Uses spatial index for O(1) lookup instead of O(n) iteration.
         """
         point = Point(x, y)
         if not self.world.in_bounds(point):
             return []
 
-        result = [e for e in self.entities if e.x == x and e.y == y]
+        result = self._entity_grid.get((x, y), [])
         if types is not None:
             type_set = set(types)
             result = [e for e in result if e.entity_type in type_set]
@@ -846,17 +895,19 @@ class GameState:
         are considered blocking. Set `ignore_bombs=True` if you want to
         consider bombs as walkable (e.g. for planning via bomb timing).
         Set `ignore_units=True` to ignore other units on the tile.
+
+        Uses spatial indices for O(1) lookups.
         """
         point = Point(x, y)
         if not self.world.in_bounds(point):
             return False
 
         if not ignore_units:
-            for u in self.all_units:
-                if u.x == x and u.y == y:
-                    return False
+            # O(1) lookup instead of iterating all units
+            if (x, y) in self._unit_grid:
+                return False
 
-        entities_here = self.entities_at(x, y)
+        entities_here = self._entity_grid.get((x, y), [])
         for e in entities_here:
             if e.entity_type in {
                 EntityType.METAL_BLOCK,
@@ -874,14 +925,15 @@ class GameState:
         This is a simple helper that checks bombs and current blasts.
         You may want to extend this logic to look at timers when doing
         more advanced planning.
+
+        Uses cached bomb list for O(k) instead of O(n) where k = number of bombs.
         """
         entities_here = self.entities_at(x, y)
         if any(e.is_dangerous(self.tick) for e in entities_here):
             return True
 
-        # simulate bomb blasts
-        all_bombs = [e for e in self.entities if e.entity_type == EntityType.BOMB]
-        for bomb in all_bombs:
+        # simulate bomb blasts using cached bomb list
+        for bomb in self._all_bombs or []:
             blast_tiles = self.get_blast_tiles_if_detonated(bomb.position)
             if Point(x, y) in blast_tiles:
                 return True
