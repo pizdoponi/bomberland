@@ -372,6 +372,7 @@ class DQNTrainer:
                 self._last_action[unit_id] = action_type
                 self._last_legal_actions[unit_id] = legal_actions
 
+            logger.debug(f"Unit {unit_id} executing action {action_type}")
             await self._execute_action(unit_id, action_type, game_state)
 
         if TRAINING_MODE_ENABLED:
@@ -537,13 +538,17 @@ class DQNTrainer:
                 win = False
             # else: draw, win stays None
 
+        # Capture metrics before end_game() resets them
+        game_length = self._metrics.current_game_length
+        game_reward = self._metrics.current_game_reward
+
         self._metrics.end_game(win)
 
         win_str = "WIN" if win is True else ("LOSS" if win is False else "DRAW")
         logger.info(
             f"Game {self._games_played} ended: {win_str} | "
-            f"Length: {self._metrics.current_game_length} | "
-            f"Reward: {self._metrics.current_game_reward:.3f}"
+            f"Length: {game_length} | "
+            f"Reward: {game_reward:.3f}"
         )
 
         self._feature_builder.reset_stack()
