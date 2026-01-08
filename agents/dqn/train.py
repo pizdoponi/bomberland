@@ -444,6 +444,11 @@ class DQNTrainer:
         ):
             return
 
+        # Only train every N steps to avoid bottlenecking on training
+        # This is a common pattern - collect multiple transitions per gradient update
+        if self._step_count % self.config.train_every_n_steps != 0:
+            return
+
         batch = self._replay_buffer.sample(self.config.batch_size)
 
         state_batch = torch.from_numpy(batch.states).float().to(self.config.device)

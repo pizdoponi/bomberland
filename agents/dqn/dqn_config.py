@@ -14,10 +14,11 @@ class DQNConfig:
 
     # Learning parameters
     gamma: float = 0.99
-    batch_size: int = 256
+    batch_size: int = 512
     replay_capacity: int = 200_000
     warmup_steps: int = 5_000
-    learning_rate: float = 0.0001
+    learning_rate: float = 0.0002
+    train_every_n_steps: int = 4  # Train once every N environment steps
 
     # Network architecture
     fc_hidden_dim: int = 256
