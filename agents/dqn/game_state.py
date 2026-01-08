@@ -73,6 +73,7 @@ class GameState:
 
     async def _on_data(self, data):
         data_type = data.get("type")
+        print(f"[DEBUG game_state.py] Received packet type: {data_type}")
 
         if data_type == "info":
             # no operation
