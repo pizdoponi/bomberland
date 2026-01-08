@@ -26,6 +26,9 @@ services:
             - SAVE_REPLAY_ENABLED=0
             - TELEMETRY_ENABLED=0
 
+            # Fast reset - no delay between games in training mode
+            - GAME_START_DELAY_MS=0
+
             # Random seeds for diverse training
             - PRNG_SEED=0
             - WORLD_SEED=0
