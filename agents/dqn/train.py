@@ -253,10 +253,15 @@ class DQNTrainer:
 
     def _on_game_state_reset(self, game_state: Dict) -> None:
         """Called when we receive a game_state message, which indicates the game has reset."""
+        tick = game_state.get("tick", "unknown")
+        print(f"[DEBUG train.py] _on_game_state_reset called, tick={tick}, _awaiting_reset={self._awaiting_reset}, event_is_set={self._reset_complete_event.is_set() if self._reset_complete_event else 'None'}")
         if self._awaiting_reset:
             logger.info("Received game_state, clearing _awaiting_reset flag")
+            print(f"[DEBUG train.py] Setting _reset_complete_event!")
             self._awaiting_reset = False
             self._reset_complete_event.set()
+        else:
+            print(f"[DEBUG train.py] NOT setting event because _awaiting_reset is False")
 
     async def _on_game_tick(self, tick_number: int, game_state_: Dict):
         # If we're awaiting a game reset, ignore stale ticks from the old game
@@ -605,11 +610,14 @@ class DQNTrainer:
         for attempt in range(1, max_reset_attempts + 1):
             # Use smaller seed range - large seeds seem more likely to fail
             world_seed = random.randint(1, 1_000_000)
+            print(f"[DEBUG train.py] Setting _awaiting_reset=True, clearing event, attempt {attempt}")
             self._awaiting_reset = True
             self._reset_complete_event.clear()
 
+            print(f"[DEBUG train.py] Sending reset request with seed {world_seed}")
             logger.debug(f"Requesting game reset with seed {world_seed} (attempt {attempt})")
             await self.admin_client.send_request_game_reset(world_seed=world_seed)
+            print(f"[DEBUG train.py] Reset request sent, now waiting for event with timeout {reset_timeout}s")
 
             try:
                 await asyncio.wait_for(
@@ -617,9 +625,11 @@ class DQNTrainer:
                     timeout=reset_timeout
                 )
                 # Reset succeeded
+                print(f"[DEBUG train.py] Event was set! Reset succeeded with seed {world_seed}")
                 logger.debug(f"Game reset succeeded with seed {world_seed}")
                 break
             except asyncio.TimeoutError:
+                print(f"[DEBUG train.py] Timeout waiting for event, _awaiting_reset={self._awaiting_reset}, event_is_set={self._reset_complete_event.is_set()}")
                 logger.warning(
                     f"Game reset timed out with seed {world_seed} (attempt {attempt}/{max_reset_attempts})"
                 )

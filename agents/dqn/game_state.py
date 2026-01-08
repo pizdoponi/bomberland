@@ -96,9 +96,12 @@ class GameState:
             print(f"unknown packet \"{data_type}\": {data}")
 
     def _on_game_state(self, game_state):
+        print(f"[DEBUG game_state.py] _on_game_state called, has callback: {self._game_state_callback is not None}")
         self._state = game_state
         if self._game_state_callback is not None:
+            print(f"[DEBUG game_state.py] Calling game_state_callback now")
             self._game_state_callback(game_state)
+            print(f"[DEBUG game_state.py] game_state_callback returned")
 
     async def _on_game_tick(self, game_tick):
         events = game_tick.get("events")
