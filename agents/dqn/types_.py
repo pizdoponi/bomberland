@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Union
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+
+# Set debug level from environment
+if os.environ.get("DEBUG", "0") == "1":
+    logger.setLevel(logging.DEBUG)
+else:
+    logger.setLevel(logging.INFO)
 
 # Constants aligned with engine defaults.
 BOMB_ARMED_TICKS = 5
