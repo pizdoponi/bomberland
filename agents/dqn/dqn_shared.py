@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Deque, List
+from typing import Deque, List, Set
 
 import numpy as np
 from dqn_config import DQNConfig
 from dqn_model import ActionType
-from types_ import EntityType, UnitState
+from types_ import EntityType, Point
 from types_ import GameState as TypedGameState
 
 MOVE_DELTAS = {
@@ -31,9 +31,41 @@ DETONATION_INDEX_BY_ACTION = {
 
 
 class DQNFeatureBuilder:
+    """
+    Feature encoding for the DQN agent.
+
+    Channel layout (18 channels total):
+
+    Terrain (3 channels):
+        0: Metal blocks (indestructible walls) - binary
+        1: Ore blocks (3 HP destructible) - HP normalized [0, 1]
+        2: Wood blocks (1 HP destructible) - binary
+
+    Hazards (3 channels):
+        3: Active blasts - urgency (1.0 = about to expire, 0.0 = just created)
+        4: Danger zone - tiles in blast range of any armed bomb - binary
+        5: Enemy bombs - normalized time until expires (1.0 = about to explode)
+
+    My bombs per unit (3 channels) - needed for detonation decisions:
+        6: Unit 0's bombs (first unit alphabetically, e.g., 'c')
+        7: Unit 1's bombs (e.g., 'd')
+        8: Unit 2's bombs (e.g., 'e')
+
+    Items (1 channel):
+        9: Powerups (blast/freeze) - binary presence
+
+    Units (6 channels):
+        10-12: My units (3) - HP normalized, 0 if dead
+        13-15: Enemy units (3) - HP normalized, 0 if dead
+
+    Armed bomb indicators (2 channels):
+        16: My armed bombs (any team bomb I could detonate if it were mine)
+        17: Enemy armed bombs
+    """
+
     def __init__(self, config: DQNConfig):
         self.config = config
-        self.num_channels = 17
+        self.num_channels = 18
         self.num_heads = 3
         self._frame_stack: Deque[np.ndarray] = deque(
             maxlen=self.config.frame_stack_size
@@ -54,47 +86,93 @@ class DQNFeatureBuilder:
     def encode_frame(self, game_state: TypedGameState) -> np.ndarray:
         height = game_state.world.height
         width = game_state.world.width
+        tick = game_state.tick
         frame = np.zeros((self.num_channels, height, width), dtype=np.float32)
+
+        # Get my unit IDs and create a mapping to channel indices
+        my_unit_ids = sorted([u.unit_id for u in game_state.my_units])
+        my_unit_to_channel = {uid: 6 + i for i, uid in enumerate(my_unit_ids[:3])}
+        my_unit_id_set = set(my_unit_ids)
+
+        # Collect bombs for danger zone calculation
+        all_bombs: list = []
 
         for entity in game_state.entities:
             x, y = entity.x, entity.y
+
             if entity.entity_type == EntityType.METAL_BLOCK:
+                # Channel 0: Metal blocks - binary
                 frame[0, y, x] = 1.0
+
             elif entity.entity_type == EntityType.ORE_BLOCK:
+                # Channel 1: Ore blocks - HP normalized
                 hp = float(entity.hp or self.config.max_ore_hp)
-                frame[1, y, x] = min(hp / self.config.max_ore_hp, 1.0)
+                frame[1, y, x] = hp / self.config.max_ore_hp
+
             elif entity.entity_type == EntityType.WOOD_BLOCK:
+                # Channel 2: Wood blocks - binary
                 frame[2, y, x] = 1.0
+
             elif entity.entity_type == EntityType.BLAST:
-                frame[3, y, x] = entity.time_until_expires(game_state.tick) or 0.0
-            elif entity.entity_type in {
-                EntityType.BLAST_POWERUP,
-                EntityType.FREEZE_POWERUP,
-            }:
-                frame[4, y, x] = entity.time_until_expires(game_state.tick) or 0.0
+                # Channel 3: Active blasts - urgency (1.0 = about to expire/safe soon)
+                time_left = entity.time_until_expires(tick)
+                if time_left is not None:
+                    frame[3, y, x] = 1.0 - time_left  # Invert: high = expiring soon
+                else:
+                    frame[3, y, x] = 0.5
+
+            elif entity.entity_type in {EntityType.BLAST_POWERUP, EntityType.FREEZE_POWERUP}:
+                # Channel 9: Powerups - binary presence
+                frame[9, y, x] = 1.0
+
             elif entity.entity_type == EntityType.BOMB:
-                bomb_owner_id_to_frame_index = {
-                    "c": 5,
-                    "d": 6,
-                    "e": 7,
-                    "f": 8,
-                    "g": 9,
-                    "h": 10,
-                }
-                bomb_owner = entity.owner_unit_id
-                assert bomb_owner is not None, "Bomb owner_unit_id should not be None"
-                frame_index = bomb_owner_id_to_frame_index[bomb_owner]
-                frame[frame_index, y, x] = (
-                    entity.time_until_expires(game_state.tick) or 0.0
+                all_bombs.append(entity)
+                owner = entity.owner_unit_id
+                is_my_bomb = owner in my_unit_id_set
+
+                # Compute urgency: 1.0 = about to explode, 0.0 = just placed
+                time_left = entity.time_until_expires(tick)
+                urgency = (1.0 - time_left) if time_left is not None else 0.5
+
+                if is_my_bomb:
+                    # Channels 6-8: Per-unit bomb channels
+                    channel = my_unit_to_channel.get(owner)
+                    if channel is not None:
+                        frame[channel, y, x] = urgency
+
+                    # Channel 16: My armed bombs
+                    if entity.is_armed(tick):
+                        frame[16, y, x] = 1.0
+                else:
+                    # Channel 5: Enemy bombs
+                    frame[5, y, x] = urgency
+
+                    # Channel 17: Enemy armed bombs
+                    if entity.is_armed(tick):
+                        frame[17, y, x] = 1.0
+
+        # Channel 4: Danger zone - tiles that would be hit by any armed bomb
+        danger_tiles: Set[Point] = set()
+        for bomb in all_bombs:
+            if bomb.is_armed(tick):
+                blast_tiles = game_state.get_blast_tiles_if_detonated(
+                    bomb.position, require_armed=False
                 )
+                danger_tiles.update(blast_tiles)
 
-        for i, my_unit in enumerate(game_state.my_units):
-            frame[11 + i, my_unit.y, my_unit.x] = my_unit.hp / self.config.max_unit_hp
+        for tile in danger_tiles:
+            if 0 <= tile.x < width and 0 <= tile.y < height:
+                frame[4, tile.y, tile.x] = 1.0
 
-        for i, enemy_unit in enumerate(game_state.enemy_units):
-            frame[14 + i, enemy_unit.y, enemy_unit.x] = (
-                enemy_unit.hp / self.config.max_unit_hp
-            )
+        # Channels 10-12: My units - HP normalized, only if alive
+        for i, unit in enumerate(game_state.my_units):
+            if i < 3 and unit.is_alive():
+                frame[10 + i, unit.y, unit.x] = unit.hp / self.config.max_unit_hp
+
+        # Channels 13-15: Enemy units - HP normalized, only if alive
+        for i, unit in enumerate(game_state.enemy_units):
+            if i < 3 and unit.is_alive():
+                frame[13 + i, unit.y, unit.x] = unit.hp / self.config.max_unit_hp
 
         return frame
 
@@ -130,13 +208,19 @@ class DQNFeatureBuilder:
         """
         Compute rewards for team and individual units.
 
+        Reward design principles:
+        1. Sparse terminal rewards for winning/losing (main objective)
+        2. Dense rewards for HP changes (intermediate progress)
+        3. Minimal shaping to avoid reward hacking
+        4. Asymmetric penalties: losing HP is worse than dealing damage (survival first)
+        5. Moderate magnitudes to avoid destabilizing Q-value estimates
+
         Returns:
             team_reward: shared objective reward
-            unit_rewards: per-unit reward = team_reward + small PBRS-like shaping
-            done: terminal flag (enemy dead or me dead)
+            unit_rewards: per-unit reward (same as team_reward, no per-unit shaping)
+            done: terminal flag (all enemies dead or all my units dead)
         """
-
-        # ---------- Terminal conditions ----------
+        # ---------- Count alive units ----------
         prev_enemy_alive = len(prev_game_state.enemy_alive_units)
         prev_my_alive = len(prev_game_state.my_alive_units)
         curr_enemy_alive = len(curr_game_state.enemy_alive_units)
@@ -144,16 +228,20 @@ class DQNFeatureBuilder:
 
         done = (curr_enemy_alive == 0) or (curr_my_alive == 0)
 
-        # Terminal reward: big signal for winning/losing
+        # ---------- Terminal rewards ----------
+        # Clear signal but not so large as to dominate early Q-estimates
         terminal = 0.0
         if curr_enemy_alive == 0 and curr_my_alive > 0:
-            terminal = 5.0  # Win
+            # Win: +3 base, +0.5 per surviving unit
+            terminal = 3.0 + 0.5 * curr_my_alive
         elif curr_my_alive == 0 and curr_enemy_alive > 0:
-            terminal = -5.0  # Loss
+            # Loss: -3 base, -0.5 per remaining enemy
+            terminal = -3.0 - 0.5 * curr_enemy_alive
         elif curr_my_alive == 0 and curr_enemy_alive == 0:
-            terminal = -1.0  # Both dead - slight penalty (we want to survive)
+            # Mutual destruction - slight negative (prefer winning)
+            terminal = -1.0
 
-        # ---------- Dense rewards: HP changes and kills ----------
+        # ---------- HP-based dense rewards ----------
         prev_my_hp = sum(u.hp for u in prev_game_state.my_units)
         curr_my_hp = sum(u.hp for u in curr_game_state.my_units)
         prev_enemy_hp = sum(u.hp for u in prev_game_state.enemy_units)
@@ -162,139 +250,23 @@ class DQNFeatureBuilder:
         enemy_hp_lost = max(0, prev_enemy_hp - curr_enemy_hp)
         my_hp_lost = max(0, prev_my_hp - curr_my_hp)
 
-        enemy_deaths = max(0, prev_enemy_alive - curr_enemy_alive)
-        my_deaths = max(0, prev_my_alive - curr_my_alive)
+        # Reward for damaging enemies
+        damage_reward = 0.15 * enemy_hp_lost
 
-        # Reward for damaging enemies (scaled to be meaningful but not overwhelming)
-        enemy_damage_reward = 0.2 * enemy_hp_lost  # +0.2 per HP damage to enemy
-        my_damage_penalty = 0.3 * my_hp_lost  # -0.3 per HP lost (asymmetric to encourage survival)
+        # Penalty for taking damage (2x asymmetry encourages caution)
+        damage_penalty = 0.3 * my_hp_lost
 
-        # Reward for kills
-        kill_reward = 0.5 * enemy_deaths  # +0.5 per enemy killed
-        death_penalty = 0.7 * my_deaths  # -0.7 per ally death
+        # ---------- Survival bonus ----------
+        # Small reward for staying alive each tick
+        survival_bonus = 0.005 * curr_my_alive if not done else 0.0
 
-        # Small step penalty to encourage efficiency (but not too large to overshadow other signals)
-        step_penalty = -0.002 if not done else 0.0
+        # ---------- Compute total reward ----------
+        team_reward = terminal + damage_reward - damage_penalty + survival_bonus
 
-        team_reward = (
-            terminal
-            + enemy_damage_reward
-            - my_damage_penalty
-            + kill_reward
-            - death_penalty
-            + step_penalty
-        )
-
-        # ---------- Per-unit shaping rewards ----------
-        def danger_score(unit: UnitState) -> float:
-            """Returns 1.0 if unit is on a dangerous tile, 0.0 otherwise."""
-            if curr_game_state.is_dangerous_tile(unit.x, unit.y):
-                return 1.0
-            return 0.0
-
-        def enemy_proximity(unit: UnitState) -> float:
-            """Returns higher value when closer to enemies (encourages aggression)."""
-            enemies = curr_game_state.enemy_alive_units
-            if not enemies:
-                return 1.0
-            dmin = min(unit.position.distance_to(e.position) for e in enemies)
-            return 1.0 / (1.0 + float(dmin))
-
-        def action_quality(unit: UnitState) -> float:
-            """Evaluate action quality for shaping."""
-            action = actions_taken.get(unit.unit_id)
-            if action is None:
-                return 0.0
-
-            # Slight penalty for doing nothing when alive
-            if action == ActionType.NOOP:
-                return -0.01
-
-            # Small reward for placing bombs (encourages activity)
-            if action == ActionType.PLACE_BOMB:
-                return 0.02
-
-            # Reward for useful detonations
-            if action.is_bomb_detonation():
-                bomb_index = DETONATION_INDEX_BY_ACTION.get(action)
-                if bomb_index is None:
-                    return 0.0
-                detonated_bombs = prev_game_state.my_units_bombs(
-                    unit_id=unit.unit_id, bomb_idx=bomb_index
-                )
-                if not detonated_bombs:
-                    return 0.0
-                blast_tiles = prev_game_state.get_blast_tiles_if_detonated(
-                    detonated_bombs[0].position,
-                    require_armed=False,
-                )
-                # Count what we hit
-                blocks_hit = sum(
-                    1
-                    for point in blast_tiles
-                    for entity in prev_game_state.entities_at(point.x, point.y)
-                    if entity.entity_type
-                    in {EntityType.WOOD_BLOCK, EntityType.ORE_BLOCK}
-                )
-                units_hit = sum(
-                    1
-                    for enemy in prev_game_state.enemy_alive_units
-                    if enemy.position in blast_tiles
-                )
-                return 0.05 * blocks_hit + 0.15 * units_hit
-
-            return 0.0
-
-        def movement_penalty(unit: UnitState) -> float:
-            """Penalty for moving into danger or self-destructive detonations."""
-            action = actions_taken.get(unit.unit_id)
-            if action is None:
-                return 0.0
-
-            previous_unit_state = prev_game_state.get_unit(unit.unit_id) or unit
-
-            # Penalty for moving into dangerous tiles
-            if action.is_movement():
-                dx, dy = MOVE_DELTAS[action]
-                new_x = previous_unit_state.x + dx
-                new_y = previous_unit_state.y + dy
-                if curr_game_state.is_dangerous_tile(new_x, new_y):
-                    return 0.5  # Significant penalty for walking into danger
-
-            # Large penalty for detonating bombs that hurt yourself
-            if action.is_bomb_detonation() and (curr_my_hp < prev_my_hp):
-                return 1.0
-
-            return 0.0
-
-        def unit_potential(unit: UnitState) -> float:
-            """
-            Potential function for PBRS-style shaping.
-            Higher values indicate better states.
-            """
-            if not unit.is_alive():
-                return 0.0
-
-            # Safety component (avoid danger)
-            safety = 1.0 - danger_score(unit) - movement_penalty(unit)
-
-            # Aggression component (be near enemies, take useful actions)
-            aggression = 0.3 * enemy_proximity(unit) + 0.7 * action_quality(unit)
-
-            # Balance safety and aggression
-            return max(0.0, 0.6 * safety + 0.4 * aggression)
-
-        # Compute per-unit rewards
+        # ---------- Per-unit rewards ----------
+        # All units share the team reward - simple and stable
         unit_rewards: dict[str, float] = {}
-        gamma = self.config.gamma
-        shaping_weight = 0.15  # Weight for shaping rewards
-
         for unit in curr_game_state.my_alive_units:
-            # PBRS: gamma * Phi(s') - Phi(s)
-            prev_unit = prev_game_state.get_unit(unit.unit_id) or unit
-            phi_prev = unit_potential(prev_unit)
-            phi_curr = unit_potential(unit)
-            shaping = gamma * phi_curr - phi_prev
-            unit_rewards[unit.unit_id] = team_reward + shaping_weight * shaping
+            unit_rewards[unit.unit_id] = team_reward
 
         return team_reward, unit_rewards, done
