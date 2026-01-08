@@ -138,6 +138,7 @@ export class GameRunner {
     };
 
     private onAdminAction = async (adminPacket: AdminPacket, connection: AdminSocketHandler) => {
+        console.log(`[DEBUG] Admin action received: ${adminPacket.type}`);
         switch (adminPacket.type) {
             case PacketType.RequestTick:
                 if (this.shouldWaitForPlayers === false) {
@@ -146,8 +147,10 @@ export class GameRunner {
                 break;
 
             case PacketType.RequestGameReset:
+                console.log(`[DEBUG] Processing game reset request`);
                 const { world_seed, prng_seed } = adminPacket;
                 await this.resetGame(world_seed, prng_seed);
+                console.log(`[DEBUG] Game reset complete`);
                 break;
 
             case PacketType.EvaluateNextState:
