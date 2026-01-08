@@ -650,6 +650,10 @@ class DQNTrainer:
 
         self._first_tick_event.clear()
 
+        # Kick off the new game by requesting the first tick
+        print(f"[DEBUG train.py] Reset complete, requesting first tick to start new game")
+        await self.admin_client.send_request_tick()
+
     async def _ensure_first_tick(self) -> None:
         while not self._first_tick_event.is_set():
             # Don't request ticks while awaiting reset - the game is still complete
