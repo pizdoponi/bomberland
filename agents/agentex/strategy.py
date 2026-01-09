@@ -631,11 +631,36 @@ def check_detonation_opportunity(
         )
 
         # Check if any enemy is in blast zone
+        enemy_in_blast = False
         for enemy in game_state.enemy_alive_units:
             if Point(enemy.x, enemy.y) in blast_tiles:
-                # Check we're not in the blast zone too
-                if Point(unit.x, unit.y) not in blast_tiles:
-                    return Point(bomb.x, bomb.y)
+                if not enemy.is_invulnerable(game_state.tick):
+                    enemy_in_blast = True
+                    break
+
+        if not enemy_in_blast:
+            continue
+
+        # Check we're not in the blast zone too
+        if Point(unit.x, unit.y) in blast_tiles:
+            if not unit.is_invulnerable(game_state.tick):
+                continue
+
+        # Check if any friendly units would be hit
+        friendly_in_blast = False
+        for friendly in game_state.my_alive_units:
+            if friendly.unit_id == unit.unit_id:
+                continue  # Already checked ourselves above
+            friendly_pos = Point(friendly.x, friendly.y)
+            if friendly_pos in blast_tiles:
+                if not friendly.is_invulnerable(game_state.tick):
+                    friendly_in_blast = True
+                    break
+
+        if friendly_in_blast:
+            continue  # Don't detonate if it would hit a friendly
+
+        return Point(bomb.x, bomb.y)
 
     return None
 
@@ -652,6 +677,7 @@ def should_place_bomb_to_clear(
     1. We can place a bomb (have one available)
     2. The bomb will reach the blocking position
     3. We can safely escape after placing
+    4. No friendly units would be hit
 
     Args:
         game_state: Current game state.
@@ -678,6 +704,15 @@ def should_place_bomb_to_clear(
     if blocked_pos not in blast_tiles:
         # Block is out of blast range - can't clear it from here
         return False
+
+    # Check if any friendly units would be hit (excluding self)
+    for friendly in game_state.my_alive_units:
+        if friendly.unit_id == unit.unit_id:
+            continue  # We check our escape separately
+        friendly_pos = Point(friendly.x, friendly.y)
+        if friendly_pos in blast_tiles:
+            # Don't place bomb if it would hit a friendly
+            return False
 
     # Check if we can escape after placing
     can_escape, escape_path = can_escape_after_bomb(game_state, unit, bomb_position)
@@ -712,10 +747,25 @@ def should_place_bomb(
     """
     from danger import can_escape_after_bomb
     from utils import can_place_bomb
+    from bomb_logic import get_bomb_blast_radius, get_hypothetical_blast_tiles
 
     # Check if we can place a bomb
     if not can_place_bomb(game_state, unit):
         return False
+
+    # Calculate blast tiles to check for friendly fire
+    bomb_position = Point(unit.x, unit.y)
+    blast_radius = get_bomb_blast_radius(unit)
+    blast_tiles = get_hypothetical_blast_tiles(game_state, bomb_position, blast_radius)
+
+    # Check if any friendly units would be hit (excluding self)
+    for friendly in game_state.my_alive_units:
+        if friendly.unit_id == unit.unit_id:
+            continue  # We check our escape separately
+        friendly_pos = Point(friendly.x, friendly.y)
+        if friendly_pos in blast_tiles:
+            # Don't place bomb if it would hit a friendly
+            return False
 
     # Check if we can escape after placing
     can_escape, escape_path = can_escape_after_bomb(game_state, unit)

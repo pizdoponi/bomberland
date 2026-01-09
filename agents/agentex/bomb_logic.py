@@ -302,6 +302,15 @@ def evaluate_bomb_placement(
     blast_radius = get_bomb_blast_radius(unit)
     blast_tiles = get_hypothetical_blast_tiles(game_state, bomb_position, blast_radius)
 
+    # Check if any friendly units would be hit (excluding self)
+    for friendly in game_state.my_alive_units:
+        if friendly.unit_id == unit.unit_id:
+            continue  # We already checked our escape
+        friendly_pos = Point(friendly.x, friendly.y)
+        if friendly_pos in blast_tiles:
+            # Don't place bomb if it would hit a friendly
+            return None
+
     # Check what we'd hit
     enemies_hit: List[UnitState] = []
     for enemy in game_state.enemy_alive_units:
@@ -338,6 +347,7 @@ def check_immediate_detonation(
     - Bomb is armed
     - Enemy is in blast zone
     - We are not in blast zone (or invulnerable)
+    - No friendly units are in blast zone (or invulnerable)
 
     Args:
         game_state: Current game state.
@@ -378,6 +388,20 @@ def check_immediate_detonation(
             # Check if invulnerable
             if not unit.is_invulnerable(game_state.tick):
                 continue
+
+        # Check if any friendly units would be hit
+        friendly_in_blast = False
+        for friendly in game_state.my_alive_units:
+            if friendly.unit_id == unit.unit_id:
+                continue  # Already checked ourselves above
+            friendly_pos = Point(friendly.x, friendly.y)
+            if friendly_pos in blast_tiles:
+                if not friendly.is_invulnerable(game_state.tick):
+                    friendly_in_blast = True
+                    break
+
+        if friendly_in_blast:
+            continue  # Don't detonate if it would hit a friendly
 
         return Point(bomb.x, bomb.y)
 
