@@ -14,12 +14,12 @@ services:
         volumes:
             - ./agents/bombwalker:/app
 
-    heureka:
+    agentex:
         build:
-            context: agents/heureka
+            context: agents/agentex
             dockerfile: Dockerfile.dev
         volumes:
-            - ./agents/heureka:/app
+            - ./agents/agentex:/app
 
     kamikaze:
         build:
