@@ -37,17 +37,27 @@ class ReplayBufferSample(NamedTuple):
 
 
 class ReplayBuffer:
-    """Circular replay buffer with O(1) random sampling.
+    """Circular replay buffer with efficient batch sampling.
 
-    Uses a list-based circular buffer instead of deque for efficient random access.
-    random.sample() on deque is O(k*n) because deque doesn't support random indexing,
-    whereas list-based sampling is O(k).
+    Uses pre-allocated contiguous numpy arrays instead of a list of Transition objects.
+    This avoids the expensive np.stack() operation during sampling by storing data
+    directly in contiguous memory that can be sliced efficiently.
     """
-    def __init__(self, capacity: int):
+    def __init__(self, capacity: int, state_shape: tuple = (72, 15, 15), num_actions: int = NUM_ACTIONS):
         self._capacity = capacity
-        self._buffer: list[Transition | None] = [None] * capacity
+        self._state_shape = state_shape
+        self._num_actions = num_actions
         self._position = 0
         self._size = 0
+
+        # Pre-allocate contiguous arrays for all data
+        self._states = np.zeros((capacity, *state_shape), dtype=np.float32)
+        self._next_states = np.zeros((capacity, *state_shape), dtype=np.float32)
+        self._head_indices = np.zeros(capacity, dtype=np.int64)
+        self._actions = np.zeros(capacity, dtype=np.int64)
+        self._rewards = np.zeros(capacity, dtype=np.float32)
+        self._next_legal_actions_mask = np.zeros((capacity, num_actions), dtype=np.float32)
+        self._dones = np.zeros(capacity, dtype=np.float32)
 
     def add(
         self,
@@ -59,30 +69,32 @@ class ReplayBuffer:
         next_legal_actions_mask: np.ndarray,
         done: float,
     ) -> None:
-        self._buffer[self._position] = Transition(
-            state=state,
-            head_index=head_index,
-            action=action,
-            reward=reward,
-            next_state=next_state,
-            next_legal_actions_mask=next_legal_actions_mask,
-            done=done,
-        )
+        idx = self._position
+        self._states[idx] = state
+        self._next_states[idx] = next_state
+        self._head_indices[idx] = head_index
+        self._actions[idx] = action.value
+        self._rewards[idx] = reward
+        self._next_legal_actions_mask[idx] = next_legal_actions_mask
+        self._dones[idx] = done
+
         self._position = (self._position + 1) % self._capacity
         self._size = min(self._size + 1, self._capacity)
 
     def sample(self, batch_size: int) -> ReplayBufferSample:
-        indices = random.sample(range(self._size), batch_size)
-        batch = [self._buffer[i] for i in indices]
-        states = np.stack([t.state for t in batch])
-        head_indices = np.array([t.head_index for t in batch], dtype=np.int64)
-        actions = np.array([t.action.value for t in batch], dtype=np.int64)
-        rewards = np.array([t.reward for t in batch], dtype=np.float32)
-        next_states = np.stack([t.next_state for t in batch])
-        next_legal_actions_mask = np.stack(
-            [t.next_legal_actions_mask for t in batch]
-        ).astype(np.float32)
-        dones = np.array([t.done for t in batch], dtype=np.float32)
+        with profile_block("replay_buffer > sample_indices"):
+            indices = np.random.choice(self._size, size=batch_size, replace=False)
+
+        # Direct array indexing - much faster than np.stack() on list comprehension
+        with profile_block("replay_buffer > index_arrays"):
+            states = self._states[indices]
+            next_states = self._next_states[indices]
+            head_indices = self._head_indices[indices]
+            actions = self._actions[indices]
+            rewards = self._rewards[indices]
+            next_legal_actions_mask = self._next_legal_actions_mask[indices]
+            dones = self._dones[indices]
+
         return ReplayBufferSample(
             states,
             head_indices,

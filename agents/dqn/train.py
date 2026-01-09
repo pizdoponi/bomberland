@@ -111,7 +111,19 @@ class DQNTrainer:
         self._epsilon = self.config.epsilon_start
 
         self._feature_builder = DQNFeatureBuilder(self.config)
-        self._replay_buffer = ReplayBuffer(self.config.replay_capacity)
+
+        # Calculate state shape for replay buffer
+        # state_shape = (num_channels * frame_stack_size, height, width)
+        state_shape = (
+            self._feature_builder.num_channels * self.config.frame_stack_size,
+            15,  # height
+            15,  # width
+        )
+        self._replay_buffer = ReplayBuffer(
+            self.config.replay_capacity,
+            state_shape=state_shape,
+            num_actions=NUM_ACTIONS,
+        )
 
         self._last_state: Dict[str, np.ndarray] = {}
         self._last_action: Dict[str, ActionType] = {}
