@@ -158,6 +158,20 @@ def evaluate_powerup_target(
 
     path_cost = len(path)
 
+    # Validate that the first step is actually walkable
+    if len(path) > 1:
+        next_pos = path[1]
+        if not is_tile_walkable_now(game_state, next_pos.x, next_pos.y):
+            # First step is blocked - invalid path
+            return Target(
+                position=position,
+                value=0,
+                target_type='powerup',
+                entity=powerup,
+                path=None,
+                path_cost=float('inf')
+            )
+
     # Check if powerup will expire before we reach it
     if powerup.expires:
         ticks_to_reach = path_cost - 1  # -1 because first element is current pos
@@ -189,6 +203,58 @@ def evaluate_powerup_target(
     )
 
 
+def is_tile_walkable_now(game_state: GameState, x: int, y: int) -> bool:
+    """Check if a tile is immediately walkable (no obstacles, bombs, or units).
+
+    Args:
+        game_state: Current game state.
+        x: X coordinate.
+        y: Y coordinate.
+
+    Returns:
+        True if tile can be walked into right now.
+    """
+    # Check bounds
+    if not (0 <= x < game_state.world.width and 0 <= y < game_state.world.height):
+        return False
+
+    # Check for blocking entities
+    entities = game_state.entities_at(x, y)
+    for entity in entities:
+        if entity.entity_type in {
+            EntityType.METAL_BLOCK,
+            EntityType.WOOD_BLOCK,
+            EntityType.ORE_BLOCK,
+            EntityType.BOMB
+        }:
+            return False
+
+    # Check for units
+    for unit in game_state.all_units:
+        if unit.is_alive() and unit.x == x and unit.y == y:
+            return False
+
+    return True
+
+
+def get_blocking_entity_at(game_state: GameState, x: int, y: int) -> Optional[Entity]:
+    """Get a blocking destructible entity at position, if any.
+
+    Args:
+        game_state: Current game state.
+        x: X coordinate.
+        y: Y coordinate.
+
+    Returns:
+        Blocking entity (wood/ore block) or None.
+    """
+    entities = game_state.entities_at(x, y)
+    for entity in entities:
+        if entity.entity_type in {EntityType.WOOD_BLOCK, EntityType.ORE_BLOCK}:
+            return entity
+    return None
+
+
 def evaluate_enemy_target(
     game_state: GameState,
     unit: UnitState,
@@ -212,16 +278,41 @@ def evaluate_enemy_target(
     missing_hp = 3 - enemy.hp
     base_value = ENEMY_VALUE_BASE + (ENEMY_VALUE_PER_MISSING_HP * missing_hp)
 
-    # Calculate path (allow destruction since we need to reach enemies)
+    # First try to find a path without destruction (safer, faster)
     path = find_path(
         game_state,
         Point(unit.x, unit.y),
         position,
         danger_map,
-        allow_destruction=True
+        allow_destruction=False  # Only walkable paths
     )
 
-    if path is None:
+    if path is not None and len(path) > 1:
+        next_pos = path[1]
+        if is_tile_walkable_now(game_state, next_pos.x, next_pos.y):
+            # Direct walkable path exists
+            path_cost = len(path)
+            value = base_value / (path_cost + 1)
+            return Target(
+                position=position,
+                value=value,
+                target_type='enemy',
+                unit=enemy,
+                path=path,
+                path_cost=path_cost
+            )
+
+    # No direct walkable path - try with destruction allowed
+    path_with_destruction = find_path(
+        game_state,
+        Point(unit.x, unit.y),
+        position,
+        danger_map,
+        allow_destruction=True  # Allow paths through blocks
+    )
+
+    if path_with_destruction is None:
+        # Completely unreachable
         return Target(
             position=position,
             value=0,
@@ -231,17 +322,17 @@ def evaluate_enemy_target(
             path_cost=float('inf')
         )
 
-    path_cost = len(path)
-
-    # Adjust value by distance
-    value = base_value / (path_cost + 1)
+    # Path exists but may require bombing obstacles
+    path_cost = len(path_with_destruction)
+    # Reduce value for paths requiring destruction (more effort)
+    value = base_value / (path_cost + 1) * 0.8
 
     return Target(
         position=position,
         value=value,
         target_type='enemy',
         unit=enemy,
-        path=path,
+        path=path_with_destruction,
         path_cost=path_cost
     )
 
@@ -417,6 +508,38 @@ def decide_unit_action(
     if target.path and len(target.path) > 1:
         next_pos = target.path[1]
 
+        # Check if next position is blocked by a destructible block
+        blocking_entity = get_blocking_entity_at(game_state, next_pos.x, next_pos.y)
+        if blocking_entity is not None:
+            # Path goes through a block - we need to bomb it first
+            # Check if we should place a bomb to clear the path
+            if should_place_bomb_to_clear(game_state, unit, next_pos, danger_map):
+                return UnitDecision(
+                    unit=unit,
+                    priority=ActionPriority.ATTACK,
+                    action_type='bomb',
+                    target=target,
+                    place_bomb=True
+                )
+            else:
+                # Can't safely bomb - wait
+                return UnitDecision(
+                    unit=unit,
+                    priority=ActionPriority.WAIT,
+                    action_type='wait',
+                    target=target
+                )
+
+        # Validate next position is actually walkable NOW
+        if not is_tile_walkable_now(game_state, next_pos.x, next_pos.y):
+            # Path is stale or invalid - wait
+            return UnitDecision(
+                unit=unit,
+                priority=ActionPriority.WAIT,
+                action_type='wait',
+                target=target
+            )
+
         # Check if next position is reserved
         if (next_pos.x, next_pos.y) in reserved_positions:
             # Try to find alternative
@@ -506,6 +629,59 @@ def check_detonation_opportunity(
                     return Point(bomb.x, bomb.y)
 
     return None
+
+
+def should_place_bomb_to_clear(
+    game_state: GameState,
+    unit: UnitState,
+    blocked_pos: Point,
+    danger_map: DangerMap
+) -> bool:
+    """Check if we should place a bomb to clear a blocking obstacle.
+
+    Only place a bomb if:
+    1. We can place a bomb (have one available)
+    2. The bomb will reach the blocking position
+    3. We can safely escape after placing
+
+    Args:
+        game_state: Current game state.
+        unit: Unit considering bomb placement.
+        blocked_pos: Position of the blocking obstacle.
+        danger_map: Pre-computed danger map.
+
+    Returns:
+        True if bomb should be placed to clear the obstacle.
+    """
+    from danger import can_escape_after_bomb
+    from utils import can_place_bomb
+    from bomb_logic import get_bomb_blast_radius, get_hypothetical_blast_tiles
+
+    # Check if we can place a bomb
+    if not can_place_bomb(game_state, unit):
+        return False
+
+    # Check if the bomb would actually reach the blocked position
+    bomb_position = Point(unit.x, unit.y)
+    blast_radius = get_bomb_blast_radius(unit)
+    blast_tiles = get_hypothetical_blast_tiles(game_state, bomb_position, blast_radius)
+
+    if blocked_pos not in blast_tiles:
+        # Block is out of blast range - can't clear it from here
+        return False
+
+    # Check if we can escape after placing
+    can_escape, escape_path = can_escape_after_bomb(game_state, unit, bomb_position)
+    if not can_escape:
+        return False
+
+    # Check if escape path is safe (not dangerous)
+    if escape_path:
+        for point in escape_path[1:]:  # Skip current position
+            if danger_map.is_dangerous(point.x, point.y):
+                return False
+
+    return True
 
 
 def should_place_bomb(

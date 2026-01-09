@@ -19,7 +19,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Dict, List, Optional, Set
+from typing import Dict, Optional, Set
 
 from game_state import GameState as GameStateClient
 from types_ import (
@@ -41,9 +41,9 @@ from strategy import (
     UnitDecision,
     get_game_phase,
 )
-from bomb_logic import BombManager, check_immediate_detonation, evaluate_bomb_placement
+from bomb_logic import check_immediate_detonation, evaluate_bomb_placement
 from endgame import FireTracker, get_endgame_target_position, should_prioritize_survival
-from utils import can_place_bomb, get_direction_to_point, manhattan_distance
+from utils import can_place_bomb, get_direction_to_point, manhattan_distance, is_position_blocked
 
 # Configure logging
 logging.basicConfig(
@@ -66,12 +66,6 @@ class Agent:
         """Initialize the agent and connect to game server."""
         self._client = GameStateClient(URI)
         self._client.set_game_tick_callback(self._on_game_tick)
-
-        # Bomb manager for tracking bomb sequences
-        self._bomb_manager = BombManager()
-
-        # Track queued actions for units (multi-tick sequences)
-        self._action_queues: Dict[str, List[ActionPacket]] = {}
 
         # Track last positions to detect stuck units
         self._last_positions: Dict[str, Point] = {}
@@ -112,7 +106,6 @@ class Agent:
 
         # Clear stale data
         self._reserved_positions.clear()
-        self._bomb_manager.clear_completed_sequences()
 
         # Create danger map for this tick
         danger_map = DangerMap(game_state)
@@ -153,19 +146,6 @@ class Agent:
         """
         unit_id = unit.unit_id
 
-        # Check if unit has queued actions
-        if unit_id in self._action_queues and self._action_queues[unit_id]:
-            action = self._action_queues[unit_id].pop(0)
-            logger.debug(f"Unit {unit_id} executing queued action: {type(action).__name__}")
-            return action
-
-        # Check if unit is in active bomb sequence
-        if self._bomb_manager.has_active_sequence(unit_id):
-            action = self._bomb_manager.get_next_action(unit_id)
-            if action:
-                logger.debug(f"Unit {unit_id} executing bomb sequence action")
-                return action
-
         # Priority 1: ESCAPE if in danger
         if unit_in_danger(game_state, unit, danger_map):
             escape_action = self._handle_escape(game_state, unit, danger_map)
@@ -173,7 +153,7 @@ class Agent:
                 logger.info(f"Unit {unit_id} escaping danger")
                 return escape_action
 
-        # Priority 2: DETONATE if enemy in blast zone
+        # Priority 2: DETONATE if enemy in blast zone (and we're safe)
         detonate_pos = check_immediate_detonation(game_state, unit)
         if detonate_pos:
             logger.info(f"Unit {unit_id} detonating bomb at {detonate_pos} to hit enemy")
@@ -295,9 +275,11 @@ class Agent:
         unit_id = unit.unit_id
 
         if decision.action_type == 'escape' and decision.next_position:
-            direction = get_direction_to_point(Point(unit.x, unit.y), decision.next_position)
-            if direction:
-                return MoveAction(unit_id=unit_id, move=direction)
+            # Validate move is possible
+            if self._is_move_valid(game_state, unit, decision.next_position):
+                direction = get_direction_to_point(Point(unit.x, unit.y), decision.next_position)
+                if direction:
+                    return MoveAction(unit_id=unit_id, move=direction)
 
         elif decision.action_type == 'move' and decision.next_position:
             # Reserve position
@@ -305,30 +287,58 @@ class Agent:
             if pos_key in self._reserved_positions:
                 return None  # Position taken
 
+            # Validate move is possible
+            if not self._is_move_valid(game_state, unit, decision.next_position):
+                return None
+
             self._reserved_positions.add(pos_key)
             direction = get_direction_to_point(Point(unit.x, unit.y), decision.next_position)
             if direction:
                 return MoveAction(unit_id=unit_id, move=direction)
 
         elif decision.action_type == 'bomb' and decision.place_bomb:
-            # Evaluate bomb placement
+            # Evaluate bomb placement - only place if safe escape exists
             bomb_plan = evaluate_bomb_placement(game_state, unit, danger_map)
-            if bomb_plan:
-                # Start bomb sequence
-                if self._bomb_manager.start_bomb_sequence(game_state, unit, danger_map):
-                    action = self._bomb_manager.get_next_action(unit_id)
-                    if action:
-                        logger.info(f"Unit {unit_id} starting bomb sequence")
-                        return action
-
-            # Fallback: just place bomb if we can
-            if can_place_bomb(game_state, unit):
+            if bomb_plan and can_place_bomb(game_state, unit):
+                logger.info(f"Unit {unit_id} placing bomb")
                 return BombAction(unit_id=unit_id)
 
         elif decision.action_type == 'detonate' and decision.detonate_position:
             return DetonateAction(unit_id=unit_id, target=decision.detonate_position)
 
         return None
+
+    def _is_move_valid(
+        self,
+        game_state: GameState,
+        unit: UnitState,
+        next_pos: Point
+    ) -> bool:
+        """Check if a move to next_pos is actually valid (tile is walkable).
+
+        Args:
+            game_state: Current game state.
+            unit: Unit trying to move.
+            next_pos: Target position.
+
+        Returns:
+            True if move is valid, False otherwise.
+        """
+        # Check if position is adjacent
+        dx = abs(next_pos.x - unit.x)
+        dy = abs(next_pos.y - unit.y)
+        if dx + dy != 1:
+            return False
+
+        # Check if position is blocked
+        if is_position_blocked(game_state, next_pos.x, next_pos.y, ignore_units=False, ignore_bombs=False):
+            return False
+
+        # Check if reserved by another unit
+        if (next_pos.x, next_pos.y) in self._reserved_positions:
+            return False
+
+        return True
 
     def _handle_fallback(
         self,
@@ -356,19 +366,20 @@ class Agent:
                 key=lambda e: manhattan_distance(current, e.position)
             )
 
+            # First try without destruction (direct walkable path)
             path = find_path(
                 game_state,
                 current,
                 nearest_enemy.position,
                 danger_map,
-                allow_destruction=True
+                allow_destruction=False  # Only walkable tiles
             )
 
             if path and len(path) > 1:
                 next_pos = path[1]
 
-                # Don't move if reserved
-                if (next_pos.x, next_pos.y) not in self._reserved_positions:
+                # Validate the move is actually possible
+                if self._is_move_valid(game_state, unit, next_pos):
                     self._reserved_positions.add((next_pos.x, next_pos.y))
                     direction = get_direction_to_point(current, next_pos)
                     if direction:
@@ -377,11 +388,24 @@ class Agent:
         # Last resort: find any safe tile to move to
         safe_tile = find_nearest_safe_tile(game_state, current, danger_map)
         if safe_tile and (safe_tile.x != unit.x or safe_tile.y != unit.y):
-            path = find_path(game_state, current, safe_tile, danger_map)
+            path = find_path(game_state, current, safe_tile, danger_map, allow_destruction=False)
             if path and len(path) > 1:
-                direction = get_direction_to_point(current, path[1])
-                if direction:
-                    return MoveAction(unit_id=unit_id, move=direction)
+                next_pos = path[1]
+                if self._is_move_valid(game_state, unit, next_pos):
+                    direction = get_direction_to_point(current, next_pos)
+                    if direction:
+                        return MoveAction(unit_id=unit_id, move=direction)
+
+        # If we can't move toward enemy or safe tile, try any valid adjacent tile
+        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            next_pos = Point(unit.x + dx, unit.y + dy)
+            if self._is_move_valid(game_state, unit, next_pos):
+                # Prefer non-dangerous tiles
+                if not danger_map.is_dangerous(next_pos.x, next_pos.y):
+                    direction = get_direction_to_point(current, next_pos)
+                    if direction:
+                        self._reserved_positions.add((next_pos.x, next_pos.y))
+                        return MoveAction(unit_id=unit_id, move=direction)
 
         return None
 
