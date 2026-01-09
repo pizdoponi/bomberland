@@ -508,6 +508,27 @@ def decide_unit_action(
     if target.path and len(target.path) > 1:
         next_pos = target.path[1]
 
+        # FIRST: Check if we're adjacent to enemy target (path length == 2)
+        # This must come before walkability checks since enemy position isn't walkable
+        if len(target.path) == 2 and target.target_type == 'enemy':
+            # We're one step away from enemy - try to bomb them
+            if should_place_bomb(game_state, unit, target, danger_map):
+                return UnitDecision(
+                    unit=unit,
+                    priority=ActionPriority.ATTACK,
+                    action_type='bomb',
+                    target=target,
+                    place_bomb=True
+                )
+            else:
+                # Can't safely bomb enemy - wait (don't walk into them)
+                return UnitDecision(
+                    unit=unit,
+                    priority=ActionPriority.WAIT,
+                    action_type='wait',
+                    target=target
+                )
+
         # Check if next position is blocked by a destructible block
         blocking_entity = get_blocking_entity_at(game_state, next_pos.x, next_pos.y)
         if blocking_entity is not None:
@@ -550,24 +571,12 @@ def decide_unit_action(
                 target=target
             )
 
-        # Check if we're adjacent to target
+        # Check if we're adjacent to non-enemy target (powerup)
         if len(target.path) == 2:
-            # We're one step away
-            if target.target_type == 'enemy':
-                # Check if we should place bomb
-                if should_place_bomb(game_state, unit, target, danger_map):
-                    return UnitDecision(
-                        unit=unit,
-                        priority=ActionPriority.ATTACK,
-                        action_type='bomb',
-                        target=target,
-                        place_bomb=True
-                    )
-
-            # Move to target
+            # Move to target (powerup)
             return UnitDecision(
                 unit=unit,
-                priority=ActionPriority.ATTACK if target.target_type == 'enemy' else ActionPriority.COLLECT,
+                priority=ActionPriority.COLLECT,
                 action_type='move',
                 target=target,
                 next_position=next_pos
