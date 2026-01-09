@@ -40,8 +40,7 @@ class ReplayBuffer:
     """Circular replay buffer with efficient batch sampling.
 
     Uses pre-allocated contiguous numpy arrays instead of a list of Transition objects.
-    This avoids the expensive np.stack() operation during sampling by storing data
-    directly in contiguous memory that can be sliced efficiently.
+    States are stored in float16 to reduce memory footprint and improve cache performance.
     """
     def __init__(self, capacity: int, state_shape: tuple = (72, 15, 15), num_actions: int = NUM_ACTIONS):
         self._capacity = capacity
@@ -51,10 +50,11 @@ class ReplayBuffer:
         self._size = 0
 
         # Pre-allocate contiguous arrays for all data
-        self._states = np.zeros((capacity, *state_shape), dtype=np.float32)
-        self._next_states = np.zeros((capacity, *state_shape), dtype=np.float32)
-        self._head_indices = np.zeros(capacity, dtype=np.int64)
-        self._actions = np.zeros(capacity, dtype=np.int64)
+        # Use float16 for states to reduce memory by 50% (states are 0-1 normalized anyway)
+        self._states = np.zeros((capacity, *state_shape), dtype=np.float16)
+        self._next_states = np.zeros((capacity, *state_shape), dtype=np.float16)
+        self._head_indices = np.zeros(capacity, dtype=np.int32)
+        self._actions = np.zeros(capacity, dtype=np.int32)
         self._rewards = np.zeros(capacity, dtype=np.float32)
         self._next_legal_actions_mask = np.zeros((capacity, num_actions), dtype=np.float32)
         self._dones = np.zeros(capacity, dtype=np.float32)
@@ -70,8 +70,8 @@ class ReplayBuffer:
         done: float,
     ) -> None:
         idx = self._position
-        self._states[idx] = state
-        self._next_states[idx] = next_state
+        self._states[idx] = state.astype(np.float16)
+        self._next_states[idx] = next_state.astype(np.float16)
         self._head_indices[idx] = head_index
         self._actions[idx] = action.value
         self._rewards[idx] = reward
@@ -85,12 +85,12 @@ class ReplayBuffer:
         with profile_block("replay_buffer > sample_indices"):
             indices = np.random.choice(self._size, size=batch_size, replace=False)
 
-        # Direct array indexing - much faster than np.stack() on list comprehension
+        # Direct array indexing - convert back to float32 for training
         with profile_block("replay_buffer > index_arrays"):
-            states = self._states[indices]
-            next_states = self._next_states[indices]
-            head_indices = self._head_indices[indices]
-            actions = self._actions[indices]
+            states = self._states[indices].astype(np.float32)
+            next_states = self._next_states[indices].astype(np.float32)
+            head_indices = self._head_indices[indices].astype(np.int64)
+            actions = self._actions[indices].astype(np.int64)
             rewards = self._rewards[indices]
             next_legal_actions_mask = self._next_legal_actions_mask[indices]
             dones = self._dones[indices]

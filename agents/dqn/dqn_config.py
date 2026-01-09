@@ -15,7 +15,7 @@ class DQNConfig:
     # Learning parameters
     gamma: float = 0.99
     batch_size: int = 1024
-    replay_capacity: int = 200_000
+    replay_capacity: int = 50_000  # Reduced from 200k for better cache performance
     warmup_steps: int = 5_000
     learning_rate: float = 0.0003  # Slightly conservative for stability
     train_every_n_steps: int = 4  # 1 gradient update per 4 env steps
