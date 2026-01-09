@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Union
 
+from profiler import profiler, profile_block
+
 logger = logging.getLogger(__name__)
 
 # Set debug level from environment
@@ -626,52 +628,58 @@ class GameState:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "GameState":
         """Parse a raw `game_state` JSON object from the engine."""
-        # Agents
-        agents_raw = data.get("agents", {})
-        agents: Dict[AgentId, Agent] = {}
-        for agent_id_str, agent_data in agents_raw.items():
-            agent_id = AgentId(str(agent_id_str))
-            agents[agent_id] = Agent.from_dict(agent_id_str, agent_data)
+        with profile_block("GameState.from_dict > parse_agents"):
+            # Agents
+            agents_raw = data.get("agents", {})
+            agents: Dict[AgentId, Agent] = {}
+            for agent_id_str, agent_data in agents_raw.items():
+                agent_id = AgentId(str(agent_id_str))
+                agents[agent_id] = Agent.from_dict(agent_id_str, agent_data)
 
-        # Units
-        units_raw = data.get("unit_state", {})
-        units: Dict[str, UnitState] = {
-            unit_id: UnitState.from_dict(unit_data)
-            for unit_id, unit_data in units_raw.items()
-        }
+        with profile_block("GameState.from_dict > parse_units"):
+            # Units
+            units_raw = data.get("unit_state", {})
+            units: Dict[str, UnitState] = {
+                unit_id: UnitState.from_dict(unit_data)
+                for unit_id, unit_data in units_raw.items()
+            }
 
-        # Entities
-        entities_raw = data.get("entities", []) or []
-        entities: List[Entity] = [Entity.from_dict(e) for e in entities_raw]
+        with profile_block("GameState.from_dict > parse_entities"):
+            # Entities
+            entities_raw = data.get("entities", []) or []
+            entities: List[Entity] = [Entity.from_dict(e) for e in entities_raw]
 
-        world = World.from_dict(data.get("world", {}))
-        config = Config.from_dict(data.get("config", {}))
-        connection = Connection.from_dict(data.get("connection", {}))
-        tick = int(data.get("tick", 0))
+        with profile_block("GameState.from_dict > parse_world_config"):
+            world = World.from_dict(data.get("world", {}))
+            config = Config.from_dict(data.get("config", {}))
+            connection = Connection.from_dict(data.get("connection", {}))
+            tick = int(data.get("tick", 0))
 
-        # Build spatial index for O(1) entity lookups
-        entity_grid: Dict[tuple, List[Entity]] = {}
-        bombs_by_owner: Dict[str, List[Entity]] = {}
-        all_bombs: List[Entity] = []
-        for e in entities:
-            key = (e.x, e.y)
-            if key not in entity_grid:
-                entity_grid[key] = []
-            entity_grid[key].append(e)
+        with profile_block("GameState.from_dict > build_entity_grid"):
+            # Build spatial index for O(1) entity lookups
+            entity_grid: Dict[tuple, List[Entity]] = {}
+            bombs_by_owner: Dict[str, List[Entity]] = {}
+            all_bombs: List[Entity] = []
+            for e in entities:
+                key = (e.x, e.y)
+                if key not in entity_grid:
+                    entity_grid[key] = []
+                entity_grid[key].append(e)
 
-            # Build bomb indices
-            if e.entity_type == EntityType.BOMB:
-                all_bombs.append(e)
-                owner = e.owner_unit_id
-                if owner is not None:
-                    if owner not in bombs_by_owner:
-                        bombs_by_owner[owner] = []
-                    bombs_by_owner[owner].append(e)
+                # Build bomb indices
+                if e.entity_type == EntityType.BOMB:
+                    all_bombs.append(e)
+                    owner = e.owner_unit_id
+                    if owner is not None:
+                        if owner not in bombs_by_owner:
+                            bombs_by_owner[owner] = []
+                        bombs_by_owner[owner].append(e)
 
-        # Build unit position index
-        unit_grid: Dict[tuple, UnitState] = {}
-        for u in units.values():
-            unit_grid[(u.x, u.y)] = u
+        with profile_block("GameState.from_dict > build_unit_grid"):
+            # Build unit position index
+            unit_grid: Dict[tuple, UnitState] = {}
+            for u in units.values():
+                unit_grid[(u.x, u.y)] = u
 
         return cls(
             agents=agents,
@@ -805,51 +813,54 @@ class GameState:
         if unit.is_stunned(execution_tick):
             return [ActionType.NOOP]  # If stunned, only NOOP is legal
 
-        # Movement
-        for direction, (dx, dy) in {
-            ActionType.UP: (0, 1),
-            ActionType.DOWN: (0, -1),
-            ActionType.LEFT: (-1, 0),
-            ActionType.RIGHT: (1, 0),
-        }.items():
-            new_x = unit.x + dx
-            new_y = unit.y + dy
-            if self.is_walkable(new_x, new_y, ignore_units=False):
-                actions.append(direction)
+        with profile_block("legal_actions > movement"):
+            # Movement
+            for direction, (dx, dy) in {
+                ActionType.UP: (0, 1),
+                ActionType.DOWN: (0, -1),
+                ActionType.LEFT: (-1, 0),
+                ActionType.RIGHT: (1, 0),
+            }.items():
+                new_x = unit.x + dx
+                new_y = unit.y + dy
+                if self.is_walkable(new_x, new_y, ignore_units=False):
+                    actions.append(direction)
 
-        # Bomb placement - use spatial index for O(1) check
-        agent_unit_ids = {
-            unit_state.unit_id
-            for unit_state in self.units.values()
-            if unit_state.agent_id == unit.agent_id
-        }
-        # Count agent bombs using cached bomb lookup - O(k) where k = num agents
-        agent_bomb_count = sum(
-            len(self._bombs_by_owner.get(uid, []))
-            for uid in agent_unit_ids
-        )
-        # O(1) check if bomb already at unit's position
-        entities_at_unit = self._entity_grid.get((unit.x, unit.y), [])
-        bomb_already_placed_here = any(
-            e.entity_type == EntityType.BOMB for e in entities_at_unit
-        )
-        if (
-            unit.inventory.bombs > 0
-            and agent_bomb_count < MAX_CONCURRENT_BOMBS_PER_AGENT
-            and not bomb_already_placed_here
-        ):
-            actions.append(ActionType.PLACE_BOMB)
+        with profile_block("legal_actions > bomb_placement"):
+            # Bomb placement - use spatial index for O(1) check
+            agent_unit_ids = {
+                unit_state.unit_id
+                for unit_state in self.units.values()
+                if unit_state.agent_id == unit.agent_id
+            }
+            # Count agent bombs using cached bomb lookup - O(k) where k = num agents
+            agent_bomb_count = sum(
+                len(self._bombs_by_owner.get(uid, []))
+                for uid in agent_unit_ids
+            )
+            # O(1) check if bomb already at unit's position
+            entities_at_unit = self._entity_grid.get((unit.x, unit.y), [])
+            bomb_already_placed_here = any(
+                e.entity_type == EntityType.BOMB for e in entities_at_unit
+            )
+            if (
+                unit.inventory.bombs > 0
+                and agent_bomb_count < MAX_CONCURRENT_BOMBS_PER_AGENT
+                and not bomb_already_placed_here
+            ):
+                actions.append(ActionType.PLACE_BOMB)
 
-        # Bomb detonations
-        my_bombs = sorted(
-            self.my_units_bombs(unit_id=unit.unit_id), key=lambda bomb: bomb.created
-        )
-        if len(my_bombs) >= 1 and my_bombs[0].is_armed(execution_tick):
-            actions.append(ActionType.DETONATE_BOMB_0)
-        if len(my_bombs) >= 2 and my_bombs[1].is_armed(execution_tick):
-            actions.append(ActionType.DETONATE_BOMB_1)
-        if len(my_bombs) >= 3 and my_bombs[2].is_armed(execution_tick):
-            actions.append(ActionType.DETONATE_BOMB_2)
+        with profile_block("legal_actions > detonations"):
+            # Bomb detonations
+            my_bombs = sorted(
+                self.my_units_bombs(unit_id=unit.unit_id), key=lambda bomb: bomb.created
+            )
+            if len(my_bombs) >= 1 and my_bombs[0].is_armed(execution_tick):
+                actions.append(ActionType.DETONATE_BOMB_0)
+            if len(my_bombs) >= 2 and my_bombs[1].is_armed(execution_tick):
+                actions.append(ActionType.DETONATE_BOMB_1)
+            if len(my_bombs) >= 3 and my_bombs[2].is_armed(execution_tick):
+                actions.append(ActionType.DETONATE_BOMB_2)
 
         logger.debug(
             f"Legal actions for unit {unit.unit_id} at tick {self.tick} are: {[a.name for a in actions]}"
@@ -961,90 +972,91 @@ class GameState:
 
         Results are cached by position for efficiency within this GameState instance.
         """
-        entities_here = self.entities_at(position.x, position.y)
-        bombs_here = [e for e in entities_here if e.entity_type == EntityType.BOMB]
+        with profile_block("get_blast_tiles"):
+            entities_here = self.entities_at(position.x, position.y)
+            bombs_here = [e for e in entities_here if e.entity_type == EntityType.BOMB]
 
-        # there should be at most one bomb at a given position
-        assert len(bombs_here) <= 1, (
-            f"Multiple bombs found at the same position {position}"
-        )
+            # there should be at most one bomb at a given position
+            assert len(bombs_here) <= 1, (
+                f"Multiple bombs found at the same position {position}"
+            )
 
-        if len(bombs_here) == 0:
-            return set()  # no bomb at this position
+            if len(bombs_here) == 0:
+                return set()  # no bomb at this position
 
-        bomb = bombs_here[0]
+            bomb = bombs_here[0]
 
-        if require_armed and not bomb.is_armed(self.tick):
-            return set()  # bomb is not armed
+            if require_armed and not bomb.is_armed(self.tick):
+                return set()  # bomb is not armed
 
-        # Create cache key based on bomb position
-        cache_key = (position.x, position.y, require_armed)
+            # Create cache key based on bomb position
+            cache_key = (position.x, position.y, require_armed)
 
-        # Check cache first
-        if cache_key in self._blast_tiles_cache:
-            return self._blast_tiles_cache[cache_key]
+            # Check cache first
+            if cache_key in self._blast_tiles_cache:
+                return self._blast_tiles_cache[cache_key]
 
-        # Track visited bombs to avoid infinite recursion in chain detonations
-        if _visited is None:
-            _visited = set()
+            # Track visited bombs to avoid infinite recursion in chain detonations
+            if _visited is None:
+                _visited = set()
 
-        if position in _visited:
-            return set()  # Already processing this bomb (cycle detection)
+            if position in _visited:
+                return set()  # Already processing this bomb (cycle detection)
 
-        _visited.add(position)
+            _visited.add(position)
 
-        # bomb's own tile is always blown up
-        blast_tiles = {position}
+            # bomb's own tile is always blown up
+            blast_tiles = {position}
 
-        # get blast radius
-        unit_id = bomb.owner_unit_id
-        assert unit_id is not None, "Bomb should have an owner_unit_id"
-        blast_radius = bomb.blast_radius(unit=self.get_unit(unit_id))
+            # get blast radius
+            unit_id = bomb.owner_unit_id
+            assert unit_id is not None, "Bomb should have an owner_unit_id"
+            blast_radius = bomb.blast_radius(unit=self.get_unit(unit_id))
 
-        # check in each cardinal direction
-        for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-            for distance in range(1, blast_radius + 1):
-                nx = position.x + dx * distance
-                ny = position.y + dy * distance
-                next_point = Point(nx, ny)
+            # check in each cardinal direction
+            for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+                for distance in range(1, blast_radius + 1):
+                    nx = position.x + dx * distance
+                    ny = position.y + dy * distance
+                    next_point = Point(nx, ny)
 
-                if not self.world.in_bounds(next_point):
-                    break
+                    if not self.world.in_bounds(next_point):
+                        break
 
-                blast_tiles.add(next_point)
+                    blast_tiles.add(next_point)
 
-                # stop if we hit a solid entity
-                entities_here = self.entities_at(nx, ny)
-                if any(
-                    e.entity_type
-                    in {
-                        EntityType.METAL_BLOCK,
-                        EntityType.ORE_BLOCK,
-                        EntityType.WOOD_BLOCK,
-                    }
-                    for e in entities_here
-                ):
-                    break
+                    # stop if we hit a solid entity
+                    entities_here = self.entities_at(nx, ny)
+                    if any(
+                        e.entity_type
+                        in {
+                            EntityType.METAL_BLOCK,
+                            EntityType.ORE_BLOCK,
+                            EntityType.WOOD_BLOCK,
+                        }
+                        for e in entities_here
+                    ):
+                        break
 
-                # propagate the blast if a bomb is hit
-                if any(e.entity_type == EntityType.BOMB for e in entities_here):
-                    blast_tiles.update(
-                        self.get_blast_tiles_if_detonated(
-                            next_point,
-                            _visited,
-                            require_armed=False,
+                    # propagate the blast if a bomb is hit
+                    if any(e.entity_type == EntityType.BOMB for e in entities_here):
+                        blast_tiles.update(
+                            self.get_blast_tiles_if_detonated(
+                                next_point,
+                                _visited,
+                                require_armed=False,
+                            )
                         )
-                    )
-                    break
+                        break
 
-        # Cache the result
-        self._blast_tiles_cache[cache_key] = blast_tiles
+            # Cache the result
+            self._blast_tiles_cache[cache_key] = blast_tiles
 
-        logger.debug(
-            f"Blast tiles for bomb at {position} (tick {self.tick}): {blast_tiles}"
-        )
+            logger.debug(
+                f"Blast tiles for bomb at {position} (tick {self.tick}): {blast_tiles}"
+            )
 
-        return blast_tiles
+            return blast_tiles
 
 
 # ─────────────────────────────────────────────────────────────

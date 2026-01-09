@@ -8,6 +8,7 @@ from typing import NamedTuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+from profiler import profiler, profile_block
 from torch import nn
 from types_ import ActionType
 
@@ -72,17 +73,23 @@ class ReplayBuffer:
         self._size = min(self._size + 1, self._capacity)
 
     def sample(self, batch_size: int) -> ReplayBufferSample:
-        indices = random.sample(range(self._size), batch_size)
-        batch = [self._buffer[i] for i in indices]
-        states = np.stack([t.state for t in batch])
-        head_indices = np.array([t.head_index for t in batch], dtype=np.int64)
-        actions = np.array([t.action.value for t in batch], dtype=np.int64)
-        rewards = np.array([t.reward for t in batch], dtype=np.float32)
-        next_states = np.stack([t.next_state for t in batch])
-        next_legal_actions_mask = np.stack(
-            [t.next_legal_actions_mask for t in batch]
-        ).astype(np.float32)
-        dones = np.array([t.done for t in batch], dtype=np.float32)
+        with profile_block("replay_buffer > sample_indices"):
+            indices = random.sample(range(self._size), batch_size)
+            batch = [self._buffer[i] for i in indices]
+        with profile_block("replay_buffer > stack_states"):
+            states = np.stack([t.state for t in batch])
+        with profile_block("replay_buffer > collect_scalars"):
+            head_indices = np.array([t.head_index for t in batch], dtype=np.int64)
+            actions = np.array([t.action.value for t in batch], dtype=np.int64)
+            rewards = np.array([t.reward for t in batch], dtype=np.float32)
+        with profile_block("replay_buffer > stack_next_states"):
+            next_states = np.stack([t.next_state for t in batch])
+        with profile_block("replay_buffer > stack_legal_actions"):
+            next_legal_actions_mask = np.stack(
+                [t.next_legal_actions_mask for t in batch]
+            ).astype(np.float32)
+        with profile_block("replay_buffer > collect_dones"):
+            dones = np.array([t.done for t in batch], dtype=np.float32)
         return ReplayBufferSample(
             states,
             head_indices,

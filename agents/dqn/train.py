@@ -15,6 +15,7 @@ from dqn_config import DQNConfig
 from dqn_model import NUM_ACTIONS, ActionType, DQNModel, ReplayBuffer
 from dqn_shared import DQNFeatureBuilder
 from game_state import GameState
+from profiler import profiler, profile_block
 from torch.optim.adamw import AdamW
 from types_ import MAX_CONCURRENT_BOMBS_PER_AGENT, SkipAction
 from types_ import GameState as TypedGameState
@@ -259,181 +260,198 @@ class DQNTrainer:
             self._reset_complete_event.set()
 
     async def _on_game_tick(self, tick_number: int, game_state_: Dict):
-        # If we're awaiting a game reset, ignore stale ticks from the old game
-        if self._awaiting_reset:
-            if tick_number > 1:
-                # This is a stale tick from the old game, ignore it completely.
-                # Do NOT request another tick - that would cause the engine to
-                # broadcast endgame_state again since the game is still complete.
-                # The _ensure_first_tick task will handle kicking off the new game
-                # once _awaiting_reset is cleared by _on_game_state_reset.
-                logger.debug(f"Ignoring stale tick {tick_number} while awaiting reset")
-                return
-            else:
-                # tick_number == 1 means the game has reset (fallback if game_state wasn't received)
-                logger.info(f"Game reset detected at tick {tick_number}")
-                self._awaiting_reset = False
-                self._reset_complete_event.set()  # Signal that reset is complete
+        with profile_block("on_game_tick_total"):
+            # If we're awaiting a game reset, ignore stale ticks from the old game
+            if self._awaiting_reset:
+                if tick_number > 1:
+                    # This is a stale tick from the old game, ignore it completely.
+                    # Do NOT request another tick - that would cause the engine to
+                    # broadcast endgame_state again since the game is still complete.
+                    # The _ensure_first_tick task will handle kicking off the new game
+                    # once _awaiting_reset is cleared by _on_game_state_reset.
+                    logger.debug(f"Ignoring stale tick {tick_number} while awaiting reset")
+                    return
+                else:
+                    # tick_number == 1 means the game has reset (fallback if game_state wasn't received)
+                    logger.info(f"Game reset detected at tick {tick_number}")
+                    self._awaiting_reset = False
+                    self._reset_complete_event.set()  # Signal that reset is complete
 
-        if not self._first_tick_event.is_set():
-            logger.info(
-                f"========== Game {self._games_played + 1} =========="
-            )
-            self._first_tick_event.set()
-
-        self._step_count += 1
-
-        game_state = TypedGameState.from_dict(game_state_)
-
-        my_units_sorted = sorted([unit.unit_id for unit in game_state.my_units])
-
-        frame = self._feature_builder.encode_frame(game_state)
-        stacked_state = self._feature_builder.update_frame_stack(frame)
-
-        if self._prev_game_state is not None:
-            team_reward, units_reward, is_episode_done = (
-                self._feature_builder.compute_team_and_unit_rewards(
-                    self._prev_game_state, game_state, self._last_action
+            if not self._first_tick_event.is_set():
+                logger.info(
+                    f"========== Game {self._games_played + 1} =========="
                 )
-            )
-            self._metrics.add_step_reward(team_reward)
-        else:
-            team_reward, units_reward, is_episode_done = 0.0, {}, False
+                self._first_tick_event.set()
 
-        timeout_reached = game_state.tick >= game_state.config.game_duration_ticks - 1
-        episode_done = is_episode_done or timeout_reached
+            self._step_count += 1
 
-        if TRAINING_MODE_ENABLED and self._prev_game_state is not None:
-            for unit_id, previous_state in list(self._last_state.items()):
-                head_index = self._feature_builder.unit_id_to_head_index(
-                    unit_id, my_units_sorted
+            with profile_block("parse_game_state"):
+                game_state = TypedGameState.from_dict(game_state_)
+
+            with profile_block("sort_units"):
+                my_units_sorted = sorted([unit.unit_id for unit in game_state.my_units])
+
+            with profile_block("encode_frame"):
+                frame = self._feature_builder.encode_frame(game_state)
+
+            with profile_block("update_frame_stack"):
+                stacked_state = self._feature_builder.update_frame_stack(frame)
+
+            with profile_block("compute_rewards"):
+                if self._prev_game_state is not None:
+                    team_reward, units_reward, is_episode_done = (
+                        self._feature_builder.compute_team_and_unit_rewards(
+                            self._prev_game_state, game_state, self._last_action
+                        )
+                    )
+                    self._metrics.add_step_reward(team_reward)
+                else:
+                    team_reward, units_reward, is_episode_done = 0.0, {}, False
+
+            timeout_reached = game_state.tick >= game_state.config.game_duration_ticks - 1
+            episode_done = is_episode_done or timeout_reached
+
+            with profile_block("add_to_replay_buffer"):
+                if TRAINING_MODE_ENABLED and self._prev_game_state is not None:
+                    for unit_id, previous_state in list(self._last_state.items()):
+                        head_index = self._feature_builder.unit_id_to_head_index(
+                            unit_id, my_units_sorted
+                        )
+                        if head_index is None:
+                            self._last_state.pop(unit_id, None)
+                            self._last_action.pop(unit_id, None)
+                            self._last_legal_actions.pop(unit_id, None)
+                            continue
+
+                        last_action = self._last_action.get(unit_id)
+                        if last_action is None:
+                            self._last_state.pop(unit_id, None)
+                            self._last_action.pop(unit_id, None)
+                            self._last_legal_actions.pop(unit_id, None)
+                            continue
+
+                        last_legal_actions = self._last_legal_actions.get(unit_id)
+                        if last_legal_actions is None:
+                            self._last_state.pop(unit_id, None)
+                            self._last_action.pop(unit_id, None)
+                            self._last_legal_actions.pop(unit_id, None)
+                            continue
+
+                        reward = units_reward.get(unit_id, team_reward)
+
+                        next_unit_state = game_state.get_unit(unit_id)
+                        legal_actions_mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
+                        legal_actions_mask[ActionType.NOOP.value] = 1.0  # always allow NOOP
+                        unit_is_alive = (
+                            next_unit_state is not None and next_unit_state.is_alive()
+                        )
+                        if unit_is_alive:
+                            for action in last_legal_actions:
+                                legal_actions_mask[action] = 1.0
+
+                        transition_done = 1.0 if (episode_done or not unit_is_alive) else 0.0
+
+                        self._replay_buffer.add(
+                            previous_state,
+                            head_index,
+                            last_action,
+                            reward,
+                            stacked_state,
+                            legal_actions_mask,
+                            transition_done,
+                        )
+
+                        if not unit_is_alive:
+                            self._last_state.pop(unit_id, None)
+                            self._last_action.pop(unit_id, None)
+
+            # Get Q-values for action selection
+            with profile_block("inference_forward_pass"):
+                state_tensor = (
+                    torch.from_numpy(stacked_state).float().unsqueeze(0).to(self.config.device)
                 )
-                if head_index is None:
-                    self._last_state.pop(unit_id, None)
-                    self._last_action.pop(unit_id, None)
-                    self._last_legal_actions.pop(unit_id, None)
-                    continue
+                with torch.no_grad():
+                    q_values = self._model(state_tensor)[0].cpu().numpy()
+                    # Track Q-values for monitoring
+                    self._metrics.add_q_value(float(np.mean(q_values)))
 
-                last_action = self._last_action.get(unit_id)
-                if last_action is None:
-                    self._last_state.pop(unit_id, None)
-                    self._last_action.pop(unit_id, None)
-                    self._last_legal_actions.pop(unit_id, None)
-                    continue
+            with profile_block("get_my_units_bombs"):
+                agent_bombs_in_play = len(game_state.my_units_bombs())
+            pending_bomb_placements = 0
 
-                last_legal_actions = self._last_legal_actions.get(unit_id)
-                if last_legal_actions is None:
-                    self._last_state.pop(unit_id, None)
-                    self._last_action.pop(unit_id, None)
-                    self._last_legal_actions.pop(unit_id, None)
-                    continue
+            with profile_block("action_selection_loop"):
+                for unit_id in my_units_sorted:
+                    unit_state = game_state.get_unit(unit_id)
+                    if unit_state is None or not unit_state.is_alive():
+                        continue
 
-                reward = units_reward.get(unit_id, team_reward)
+                    head_index = self._feature_builder.unit_id_to_head_index(
+                        unit_id, my_units_sorted
+                    )
+                    if head_index is None:
+                        continue
 
-                next_unit_state = game_state.get_unit(unit_id)
-                legal_actions_mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
-                legal_actions_mask[ActionType.NOOP.value] = 1.0  # always allow NOOP
-                unit_is_alive = (
-                    next_unit_state is not None and next_unit_state.is_alive()
-                )
-                if unit_is_alive:
-                    for action in last_legal_actions:
-                        legal_actions_mask[action] = 1.0
+                    with profile_block("legal_actions"):
+                        legal_action_types = game_state.legal_actions(unit_state)
+                    if (
+                        ActionType.PLACE_BOMB in legal_action_types
+                        and agent_bombs_in_play + pending_bomb_placements
+                        >= MAX_CONCURRENT_BOMBS_PER_AGENT
+                    ):
+                        legal_action_types = [
+                            action
+                            for action in legal_action_types
+                            if action != ActionType.PLACE_BOMB
+                        ]
+                    legal_actions = [action.value for action in legal_action_types]
 
-                transition_done = 1.0 if (episode_done or not unit_is_alive) else 0.0
+                    action_index = self._select_action(q_values[head_index], legal_actions)
+                    action_type = ActionType.from_index(action_index)
 
-                self._replay_buffer.add(
-                    previous_state,
-                    head_index,
-                    last_action,
-                    reward,
-                    stacked_state,
-                    legal_actions_mask,
-                    transition_done,
-                )
+                    if action_type == ActionType.PLACE_BOMB:
+                        pending_bomb_placements += 1
 
-                if not unit_is_alive:
-                    self._last_state.pop(unit_id, None)
-                    self._last_action.pop(unit_id, None)
+                    if TRAINING_MODE_ENABLED and not episode_done:
+                        self._last_state[unit_id] = stacked_state
+                        self._last_action[unit_id] = action_type
+                        self._last_legal_actions[unit_id] = legal_actions
 
-        # Get Q-values for action selection
-        state_tensor = (
-            torch.from_numpy(stacked_state).float().unsqueeze(0).to(self.config.device)
-        )
-        with torch.no_grad():
-            q_values = self._model(state_tensor)[0].cpu().numpy()
-            # Track Q-values for monitoring
-            self._metrics.add_q_value(float(np.mean(q_values)))
+                    logger.debug(f"Unit {unit_id} executing action {action_type}")
+                    with profile_block("execute_action"):
+                        await self._execute_action(unit_id, action_type, game_state)
 
-        agent_bombs_in_play = len(game_state.my_units_bombs())
-        pending_bomb_placements = 0
+            if TRAINING_MODE_ENABLED:
+                with profile_block("train_step"):
+                    self._train_step()
 
-        for unit_id in my_units_sorted:
-            unit_state = game_state.get_unit(unit_id)
-            if unit_state is None or not unit_state.is_alive():
-                continue
+                if self._step_count % self.config.target_update_interval == 0:
+                    logger.info(f"Updating target network at step {self._step_count}")
+                    with profile_block("update_target_network"):
+                        self._target_model.load_state_dict(self._model.state_dict())
 
-            head_index = self._feature_builder.unit_id_to_head_index(
-                unit_id, my_units_sorted
-            )
-            if head_index is None:
-                continue
+                if self._step_count % self.config.save_interval == 0:
+                    with profile_block("save_checkpoint"):
+                        self._save_checkpoint()
 
-            legal_action_types = game_state.legal_actions(unit_state)
-            if (
-                ActionType.PLACE_BOMB in legal_action_types
-                and agent_bombs_in_play + pending_bomb_placements
-                >= MAX_CONCURRENT_BOMBS_PER_AGENT
-            ):
-                legal_action_types = [
-                    action
-                    for action in legal_action_types
-                    if action != ActionType.PLACE_BOMB
-                ]
-            legal_actions = [action.value for action in legal_action_types]
+                # update epsilon
+                if (
+                    self._epsilon > self.config.epsilon_min
+                    and len(self._replay_buffer) > self.config.warmup_steps
+                ):
+                    self._epsilon = max(
+                        self.config.epsilon_min,
+                        self._epsilon * self.config.epsilon_decay,
+                    )
 
-            action_index = self._select_action(q_values[head_index], legal_actions)
-            action_type = ActionType.from_index(action_index)
+            self._prev_game_state = game_state
 
-            if action_type == ActionType.PLACE_BOMB:
-                pending_bomb_placements += 1
+            # should happen in _on_endgame, but just in case
+            if episode_done:
+                self._last_state.clear()
+                self._last_action.clear()
 
-            if TRAINING_MODE_ENABLED and not episode_done:
-                self._last_state[unit_id] = stacked_state
-                self._last_action[unit_id] = action_type
-                self._last_legal_actions[unit_id] = legal_actions
-
-            logger.debug(f"Unit {unit_id} executing action {action_type}")
-            await self._execute_action(unit_id, action_type, game_state)
-
-        if TRAINING_MODE_ENABLED:
-            self._train_step()
-
-            if self._step_count % self.config.target_update_interval == 0:
-                logger.info(f"Updating target network at step {self._step_count}")
-                self._target_model.load_state_dict(self._model.state_dict())
-
-            if self._step_count % self.config.save_interval == 0:
-                self._save_checkpoint()
-
-            # update epsilon
-            if (
-                self._epsilon > self.config.epsilon_min
-                and len(self._replay_buffer) > self.config.warmup_steps
-            ):
-                self._epsilon = max(
-                    self.config.epsilon_min,
-                    self._epsilon * self.config.epsilon_decay,
-                )
-
-        self._prev_game_state = game_state
-
-        # should happen in _on_endgame, but just in case
-        if episode_done:
-            self._last_state.clear()
-            self._last_action.clear()
-
-        await self.admin_client.send_request_tick()
+            with profile_block("send_request_tick"):
+                await self.admin_client.send_request_tick()
 
     def _train_step(self) -> None:
         if (
@@ -449,55 +467,62 @@ class DQNTrainer:
         if self._step_count % self.config.train_every_n_steps != 0:
             return
 
-        batch = self._replay_buffer.sample(self.config.batch_size)
+        with profile_block("train_step > sample_replay"):
+            batch = self._replay_buffer.sample(self.config.batch_size)
 
         # Use pin_memory + non_blocking for faster CPU→GPU transfer
-        device = self.config.device
-        state_batch = torch.from_numpy(batch.states).float().pin_memory().to(device, non_blocking=True)
-        next_state_batch = torch.from_numpy(batch.next_states).float().pin_memory().to(device, non_blocking=True)
-        head_index_batch = torch.from_numpy(batch.head_indices).long().pin_memory().to(device, non_blocking=True)
-        action_batch = torch.from_numpy(batch.actions).long().pin_memory().to(device, non_blocking=True)
-        reward_batch = torch.from_numpy(batch.rewards).float().pin_memory().to(device, non_blocking=True)
-        next_legal_action_mask_batch = torch.from_numpy(batch.next_legal_actions_mask).float().pin_memory().to(device, non_blocking=True)
-        done_batch = torch.from_numpy(batch.dones).float().pin_memory().to(device, non_blocking=True)
+        with profile_block("train_step > to_device"):
+            device = self.config.device
+            state_batch = torch.from_numpy(batch.states).float().pin_memory().to(device, non_blocking=True)
+            next_state_batch = torch.from_numpy(batch.next_states).float().pin_memory().to(device, non_blocking=True)
+            head_index_batch = torch.from_numpy(batch.head_indices).long().pin_memory().to(device, non_blocking=True)
+            action_batch = torch.from_numpy(batch.actions).long().pin_memory().to(device, non_blocking=True)
+            reward_batch = torch.from_numpy(batch.rewards).float().pin_memory().to(device, non_blocking=True)
+            next_legal_action_mask_batch = torch.from_numpy(batch.next_legal_actions_mask).float().pin_memory().to(device, non_blocking=True)
+            done_batch = torch.from_numpy(batch.dones).float().pin_memory().to(device, non_blocking=True)
 
         batch_indices = torch.arange(self.config.batch_size, device=self.config.device)
 
-        q_values = self._model(state_batch)
-        predicted_q = q_values[batch_indices, head_index_batch, action_batch]
+        with profile_block("train_step > forward_online"):
+            q_values = self._model(state_batch)
+            predicted_q = q_values[batch_indices, head_index_batch, action_batch]
 
-        with torch.no_grad():
-            # Double DQN: use online network to select actions, target to evaluate
-            q_next_online = self._model(next_state_batch)
-            q_next_online_head = q_next_online[batch_indices, head_index_batch]
-            masked_q_next_online = q_next_online_head.masked_fill(
-                next_legal_action_mask_batch == 0, -1e9
-            )
-            next_actions = torch.argmax(masked_q_next_online, dim=1)
+        with profile_block("train_step > compute_target"):
+            with torch.no_grad():
+                # Double DQN: use online network to select actions, target to evaluate
+                q_next_online = self._model(next_state_batch)
+                q_next_online_head = q_next_online[batch_indices, head_index_batch]
+                masked_q_next_online = q_next_online_head.masked_fill(
+                    next_legal_action_mask_batch == 0, -1e9
+                )
+                next_actions = torch.argmax(masked_q_next_online, dim=1)
 
-            q_next_target = self._target_model(next_state_batch)
-            q_next_target_head = q_next_target[batch_indices, head_index_batch]
-            next_q_values = q_next_target_head.gather(
-                1, next_actions.unsqueeze(1)
-            ).squeeze(1)
+                q_next_target = self._target_model(next_state_batch)
+                q_next_target_head = q_next_target[batch_indices, head_index_batch]
+                next_q_values = q_next_target_head.gather(
+                    1, next_actions.unsqueeze(1)
+                ).squeeze(1)
 
-            target_values = (
-                reward_batch + (1.0 - done_batch) * self.config.gamma * next_q_values
-            )
+                target_values = (
+                    reward_batch + (1.0 - done_batch) * self.config.gamma * next_q_values
+                )
 
-        # Huber loss for stability
-        loss = F.smooth_l1_loss(predicted_q, target_values)
+        with profile_block("train_step > loss_backward"):
+            # Huber loss for stability
+            loss = F.smooth_l1_loss(predicted_q, target_values)
 
-        # Track TD error for metrics
-        with torch.no_grad():
-            td_error = torch.abs(predicted_q - target_values).mean().item()
-            self._metrics.add_td_error(td_error)
+            # Track TD error for metrics
+            with torch.no_grad():
+                td_error = torch.abs(predicted_q - target_values).mean().item()
+                self._metrics.add_td_error(td_error)
 
-        self._optimizer.zero_grad()
-        loss.backward()
-        # Gradient clipping for stability
-        torch.nn.utils.clip_grad_norm_(self._model.parameters(), max_norm=10.0)
-        self._optimizer.step()
+            self._optimizer.zero_grad()
+            loss.backward()
+
+        with profile_block("train_step > optimizer_step"):
+            # Gradient clipping for stability
+            torch.nn.utils.clip_grad_norm_(self._model.parameters(), max_norm=10.0)
+            self._optimizer.step()
 
         self._metrics.add_loss(loss.item())
 

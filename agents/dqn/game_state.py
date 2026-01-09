@@ -3,6 +3,7 @@ from typing import Optional, Union
 import websockets
 import json
 
+from profiler import profiler, profile_block
 from websockets.client import WebSocketClientProtocol
 
 _move_set = set(("up", "down", "left", "right"))
@@ -31,7 +32,8 @@ class GameState:
             return self.connection
 
     async def _send(self, packet):
-        await self.connection.send(json.dumps(packet))
+        with profile_block("websocket_send"):
+            await self.connection.send(json.dumps(packet))
 
     async def send_move(self, move: str, unit_id: str):
         if move in _move_set:
@@ -64,8 +66,10 @@ class GameState:
     async def _handle_messages(self, connection: WebSocketClientProtocol):
         while True:
             try:
-                raw_data = await connection.recv()
-                data = json.loads(raw_data)
+                with profile_block("websocket_recv"):
+                    raw_data = await connection.recv()
+                with profile_block("websocket_json_parse"):
+                    data = json.loads(raw_data)
                 await self._on_data(data)
             except websockets.exceptions.ConnectionClosed:
                 print('Connection with server closed')
@@ -100,25 +104,26 @@ class GameState:
             self._game_state_callback(game_state)
 
     async def _on_game_tick(self, game_tick):
-        events = game_tick.get("events")
-        for event in events:
-            event_type = event.get("type")
-            if event_type == "entity_spawned":
-                self._on_entity_spawned(event)
-            elif event_type == "entity_expired":
-                self._on_entity_expired(event)
-            elif event_type == "unit_state":
-                payload = event.get("data")
-                self._on_unit_state(payload)
-            elif event_type == "entity_state":
-                x, y = event.get("coordinates")
-                updated_entity = event.get("updated_entity")
-                self._on_entity_state(x, y, updated_entity)
-            elif event_type == "unit":
-                unit_action = event.get("data")
-                self._on_unit_action(unit_action)
-            else:
-                print(f"unknown event type {event_type}: {event}")
+        with profile_block("process_game_events"):
+            events = game_tick.get("events")
+            for event in events:
+                event_type = event.get("type")
+                if event_type == "entity_spawned":
+                    self._on_entity_spawned(event)
+                elif event_type == "entity_expired":
+                    self._on_entity_expired(event)
+                elif event_type == "unit_state":
+                    payload = event.get("data")
+                    self._on_unit_state(payload)
+                elif event_type == "entity_state":
+                    x, y = event.get("coordinates")
+                    updated_entity = event.get("updated_entity")
+                    self._on_entity_state(x, y, updated_entity)
+                elif event_type == "unit":
+                    unit_action = event.get("data")
+                    self._on_unit_action(unit_action)
+                else:
+                    print(f"unknown event type {event_type}: {event}")
         if self._tick_callback is not None:
             tick_number = game_tick.get("tick")
             self._state["tick"] = tick_number
