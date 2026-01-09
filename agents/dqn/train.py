@@ -617,6 +617,10 @@ class DQNTrainer:
             f"Reward: {game_reward:.3f}"
         )
 
+        # Log profiling summary every 20 games
+        if self._games_played % 20 == 0:
+            profiler.print_summary()
+
         self._feature_builder.reset_stack()
         self._last_state.clear()
         self._last_action.clear()

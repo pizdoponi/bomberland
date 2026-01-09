@@ -19,13 +19,12 @@ Usage:
 
 from __future__ import annotations
 
-import atexit
 import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 @dataclass
@@ -133,19 +132,18 @@ class Profiler:
     def get_summary(self) -> str:
         """Get a formatted summary of all profiling data."""
         if not self._stats:
-            return "No profiling data collected."
+            return "grepthis No profiling data collected."
 
         total_elapsed = time.perf_counter() - self._start_time
 
         lines = [
-            "",
-            "=" * 120,
-            "PROFILING SUMMARY",
-            "=" * 120,
-            f"Total wall time: {total_elapsed:.2f}s",
-            "",
-            f"{'Section':<60} {'Calls':>10} {'Total(s)':>12} {'Avg(ms)':>12} {'Recent(ms)':>12} {'Min(ms)':>10} {'Max(ms)':>10}",
-            "-" * 120,
+            "grepthis ========================================",
+            "grepthis PROFILING SUMMARY",
+            "grepthis ========================================",
+            f"grepthis Total wall time: {total_elapsed:.2f}s",
+            "grepthis ",
+            f"grepthis {'Section':<55} {'Calls':>8} {'Total(s)':>10} {'Avg(ms)':>10} {'Recent(ms)':>10} {'%':>6}",
+            "grepthis " + "-" * 105,
         ]
 
         # Sort by total time descending
@@ -155,34 +153,20 @@ class Profiler:
             reverse=True
         )
 
-        for name, stats in sorted_stats:
-            if stats.call_count == 0:
-                continue
-            lines.append(
-                f"{name:<60} "
-                f"{stats.call_count:>10,} "
-                f"{stats.total_time:>12.3f} "
-                f"{stats.avg_time * 1000:>12.3f} "
-                f"{stats.recent_avg * 1000:>12.3f} "
-                f"{stats.min_time * 1000:>10.3f} "
-                f"{stats.max_time * 1000:>10.3f}"
-            )
-
-        lines.append("=" * 120)
-
-        # Also show percentage breakdown
-        lines.append("")
-        lines.append("TOP 20 BY PERCENTAGE OF TOTAL TIME:")
-        lines.append("-" * 80)
-
-        for name, stats in sorted_stats[:20]:
+        for name, stats in sorted_stats[:30]:  # Top 30
             if stats.call_count == 0:
                 continue
             pct = (stats.total_time / total_elapsed) * 100 if total_elapsed > 0 else 0
-            bar = "#" * int(pct / 2)  # Scale bar to 50 chars max
-            lines.append(f"{name:<50} {pct:>6.2f}% {bar}")
+            lines.append(
+                f"grepthis {name:<55} "
+                f"{stats.call_count:>8,} "
+                f"{stats.total_time:>10.3f} "
+                f"{stats.avg_time * 1000:>10.3f} "
+                f"{stats.recent_avg * 1000:>10.3f} "
+                f"{pct:>6.1f}"
+            )
 
-        lines.append("=" * 120)
+        lines.append("grepthis ========================================")
         return "\n".join(lines)
 
     def print_summary(self) -> None:
@@ -205,10 +189,3 @@ def profile_block(name: str):
     """Context manager for profiling a block of code."""
     with profiler.block(name):
         yield
-
-
-# Register to print summary on exit
-def _print_on_exit():
-    profiler.print_summary()
-
-atexit.register(_print_on_exit)
