@@ -24,7 +24,7 @@ class DQNConfig:
     per_alpha: float = 0.6  # Priority exponent (0=uniform, 1=full prioritization)
     per_beta_start: float = 0.4  # Importance sampling start (low = more prioritization)
     per_beta_end: float = 1.0  # Importance sampling end (1.0 = full correction)
-    per_beta_steps: int = 500_000  # Steps to anneal beta (should match max_steps)
+    per_beta_steps: int = 1_000_000  # Steps to anneal beta (should match max_steps)
     per_epsilon: float = 1e-6  # Small constant to ensure non-zero priority
 
     # Network architecture
@@ -60,7 +60,7 @@ class DQNConfig:
     device: str = "cuda"
 
     # Training control
-    max_steps: int = 500_000
+    max_steps: int = 1_000_000
     eval_interval: int = 10_000
     eval_games: int = 20
 
