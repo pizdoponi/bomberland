@@ -50,10 +50,10 @@ logger.info(f"{agent_uri=}")
 class TrainingMetrics:
     """Track training metrics for monitoring progress."""
 
-    # Per-game metrics
-    game_rewards: Deque[float] = field(default_factory=lambda: deque(maxlen=100))
-    game_lengths: Deque[int] = field(default_factory=lambda: deque(maxlen=100))
-    game_wins: Deque[int] = field(default_factory=lambda: deque(maxlen=100))  # 1=win, 0=loss, 0.5=draw
+    # Per-game metrics (1000 games for stable feedback)
+    game_rewards: Deque[float] = field(default_factory=lambda: deque(maxlen=1000))
+    game_lengths: Deque[int] = field(default_factory=lambda: deque(maxlen=1000))
+    game_wins: Deque[int] = field(default_factory=lambda: deque(maxlen=1000))  # 1=win, 0=loss, 0.5=draw
 
     # Per-step metrics
     losses: Deque[float] = field(default_factory=lambda: deque(maxlen=1000))
@@ -92,12 +92,13 @@ class TrainingMetrics:
 
     def get_summary(self) -> Dict[str, float]:
         return {
-            "avg_reward_100": np.mean(self.game_rewards) if self.game_rewards else 0.0,
-            "avg_length_100": np.mean(self.game_lengths) if self.game_lengths else 0.0,
-            "win_rate_100": np.mean(self.game_wins) if self.game_wins else 0.0,
-            "avg_loss_1000": np.mean(self.losses) if self.losses else 0.0,
-            "avg_q_1000": np.mean(self.q_values) if self.q_values else 0.0,
-            "avg_td_error_1000": np.mean(self.td_errors) if self.td_errors else 0.0,
+            "avg_reward": np.mean(self.game_rewards) if self.game_rewards else 0.0,
+            "avg_length": np.mean(self.game_lengths) if self.game_lengths else 0.0,
+            "win_rate": np.mean(self.game_wins) if self.game_wins else 0.0,
+            "avg_loss": np.mean(self.losses) if self.losses else 0.0,
+            "avg_q": np.mean(self.q_values) if self.q_values else 0.0,
+            "avg_td_error": np.mean(self.td_errors) if self.td_errors else 0.0,
+            "num_games_in_window": len(self.game_wins),
         }
 
 
@@ -526,19 +527,19 @@ class DQNTrainer:
             f"Step {self._step_count:,} | "
             f"Games {self._games_played} | "
             f"ε {self._epsilon:.4f} | "
-            f"Loss {metrics['avg_loss_1000']:.6f} | "
-            f"Q {metrics['avg_q_1000']:.3f} | "
-            f"TD {metrics['avg_td_error_1000']:.4f} | "
-            f"WinRate {metrics['win_rate_100']:.1%} | "
-            f"AvgReward {metrics['avg_reward_100']:.3f} | "
-            f"AvgLen {metrics['avg_length_100']:.0f} | "
+            f"Loss {metrics['avg_loss']:.6f} | "
+            f"Q {metrics['avg_q']:.3f} | "
+            f"TD {metrics['avg_td_error']:.4f} | "
+            f"WinRate {metrics['win_rate']:.1%} | "
+            f"AvgReward {metrics['avg_reward']:.3f} | "
+            f"AvgLen {metrics['avg_length']:.0f} | "
             f"Buffer {len(self._replay_buffer):,} | "
             f"Steps/s {steps_per_sec:.1f}"
         )
 
         # Update LR scheduler based on win rate
         if self._games_played >= 100:
-            self._scheduler.step(metrics['win_rate_100'])
+            self._scheduler.step(metrics['win_rate'])
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
         """Select action using epsilon-greedy with legal action masking."""
