@@ -438,7 +438,8 @@ def can_escape_after_bomb(
     game_state: GameState,
     unit: UnitState,
     bomb_position: Optional[Point] = None,
-    max_escape_moves: int = 3
+    max_escape_moves: int = 3,
+    danger_map: Optional['DangerMap'] = None
 ) -> Tuple[bool, Optional[List[Point]]]:
     """Check if a unit can escape after placing a bomb.
 
@@ -449,6 +450,8 @@ def can_escape_after_bomb(
         max_escape_moves: Maximum number of moves allowed to escape (default 3).
             This ensures the unit can reach safety quickly rather than finding
             any path that eventually exits the blast zone.
+        danger_map: Pre-computed danger map for checking existing bomb dangers.
+            If not provided, one will be created.
 
     Returns:
         Tuple of (can_escape, escape_path).
@@ -456,11 +459,15 @@ def can_escape_after_bomb(
     if bomb_position is None:
         bomb_position = Point(unit.x, unit.y)
 
+    # Create danger map if not provided (to check existing bombs)
+    if danger_map is None:
+        danger_map = DangerMap(game_state)
+
     # Simulate the bomb placement
     blast_radius = max(0, (unit.blast_diameter - 1) // 2)
 
-    # Get tiles in blast zone
-    blast_tiles: Set[Tuple[int, int]] = {(bomb_position.x, bomb_position.y)}
+    # Get tiles in blast zone of the NEW bomb
+    new_bomb_blast_tiles: Set[Tuple[int, int]] = {(bomb_position.x, bomb_position.y)}
 
     for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
         for dist in range(1, blast_radius + 1):
@@ -469,7 +476,7 @@ def can_escape_after_bomb(
             if not (0 <= nx < game_state.world.width and 0 <= ny < game_state.world.height):
                 break
 
-            blast_tiles.add((nx, ny))
+            new_bomb_blast_tiles.add((nx, ny))
 
             # Check for blocking entities
             entities_here = game_state.entities_at(nx, ny)
@@ -516,11 +523,20 @@ def can_escape_after_bomb(
             visited.add((nx, ny))
             new_path = path + [Point(nx, ny)]
 
-            # Check if outside blast zone
-            if (nx, ny) not in blast_tiles:
+            # Check if outside BOTH the new bomb's blast zone AND any existing danger zones
+            outside_new_blast = (nx, ny) not in new_bomb_blast_tiles
+            outside_existing_danger = not danger_map.is_dangerous(nx, ny)
+
+            if outside_new_blast and outside_existing_danger:
                 return True, new_path
 
-            queue.append(((nx, ny), new_path))
+            # Only continue searching if we're not in an existing danger zone
+            # (we can traverse our own blast zone while escaping, but not other bombs' zones)
+            if not danger_map.is_dangerous(nx, ny):
+                queue.append(((nx, ny), new_path))
+            # Also allow traversing through new bomb's blast zone (we have to escape through it)
+            elif (nx, ny) in new_bomb_blast_tiles:
+                queue.append(((nx, ny), new_path))
 
     return False, None
 

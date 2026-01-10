@@ -293,8 +293,12 @@ def evaluate_bomb_placement(
     if not can_place_bomb(game_state, unit):
         return None
 
-    # Check escape
-    can_escape, escape_path = can_escape_after_bomb(game_state, unit, bomb_position)
+    # Create danger map if not provided
+    if danger_map is None:
+        danger_map = DangerMap(game_state)
+
+    # Check escape (pass danger_map to check existing bombs)
+    can_escape, escape_path = can_escape_after_bomb(game_state, unit, bomb_position, danger_map=danger_map)
     if not can_escape or escape_path is None:
         return None
 
@@ -453,8 +457,8 @@ def get_optimal_bomb_positions(
             if enemy_pos not in hypothetical_blast:
                 continue
 
-            # Check if we can escape from this position
-            can_escape, _ = can_escape_after_bomb(game_state, unit, pos)
+            # Check if we can escape from this position (pass danger_map)
+            can_escape, _ = can_escape_after_bomb(game_state, unit, pos, danger_map=danger_map)
             if not can_escape:
                 continue
 

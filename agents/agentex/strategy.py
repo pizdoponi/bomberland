@@ -345,7 +345,7 @@ def find_bombing_position(
                 continue
 
             # Check if we can escape from this position after placing a bomb
-            can_escape, _ = can_escape_after_bomb(game_state, unit, candidate)
+            can_escape, _ = can_escape_after_bomb(game_state, unit, candidate, danger_map=danger_map)
             if can_escape:
                 candidate_positions.append(candidate)
 
@@ -359,7 +359,8 @@ def find_bombing_position(
 
 def find_escape_creating_bomb(
     game_state: GameState,
-    unit: UnitState
+    unit: UnitState,
+    danger_map: Optional[DangerMap] = None
 ) -> bool:
     """Check if we should bomb to create an escape route.
 
@@ -370,17 +371,22 @@ def find_escape_creating_bomb(
     Args:
         game_state: Current game state.
         unit: Unit that might need to create space.
+        danger_map: Pre-computed danger map.
 
     Returns:
         True if we should place a bomb to create escape space.
     """
-    from danger import can_escape_after_bomb
+    from danger import can_escape_after_bomb, DangerMap as DM
     from bomb_logic import get_bomb_blast_radius, get_hypothetical_blast_tiles
     from utils import can_place_bomb
 
     # Can't place bomb if we don't have one
     if not can_place_bomb(game_state, unit):
         return False
+
+    # Create danger map if not provided
+    if danger_map is None:
+        danger_map = DM(game_state)
 
     unit_pos = Point(unit.x, unit.y)
     blast_radius = get_bomb_blast_radius(unit)
@@ -412,7 +418,7 @@ def find_escape_creating_bomb(
     # So we check: is there a position we could escape TO if we wait for destruction?
 
     # For now, use a simpler heuristic: if we can escape within the allowed moves, do it
-    can_escape, _ = can_escape_after_bomb(game_state, unit, unit_pos)
+    can_escape, _ = can_escape_after_bomb(game_state, unit, unit_pos, danger_map=danger_map)
     return can_escape
 
 
@@ -734,7 +740,7 @@ def decide_unit_action(
 
                 # Can't find bombing position for target - try to create space by bombing
                 # any adjacent destructible block (to open up escape routes)
-                if find_escape_creating_bomb(game_state, unit):
+                if find_escape_creating_bomb(game_state, unit, danger_map):
                     return UnitDecision(
                         unit=unit,
                         priority=ActionPriority.EXPLORE,
@@ -912,12 +918,14 @@ def should_place_bomb_to_clear(
             # Don't place bomb if it would hit a friendly
             return False
 
-    # Check if we can escape after placing
-    can_escape, escape_path = can_escape_after_bomb(game_state, unit, bomb_position)
+    # Check if we can escape after placing (pass danger_map)
+    can_escape, escape_path = can_escape_after_bomb(game_state, unit, bomb_position, danger_map=danger_map)
     if not can_escape:
         return False
 
     # Check if escape path is safe (not dangerous)
+    # Note: With the updated can_escape_after_bomb, this should already be checked,
+    # but we double-check here for safety
     if escape_path:
         for point in escape_path[1:]:  # Skip current position
             if danger_map.is_dangerous(point.x, point.y):
@@ -965,12 +973,14 @@ def should_place_bomb(
             # Don't place bomb if it would hit a friendly
             return False
 
-    # Check if we can escape after placing
-    can_escape, escape_path = can_escape_after_bomb(game_state, unit)
+    # Check if we can escape after placing (pass danger_map)
+    can_escape, escape_path = can_escape_after_bomb(game_state, unit, danger_map=danger_map)
     if not can_escape:
         return False
 
     # Check if escape path is safe
+    # Note: With the updated can_escape_after_bomb, this should already be checked,
+    # but we double-check here for safety
     if escape_path:
         for point in escape_path[1:]:  # Skip current position
             if danger_map.is_dangerous(point.x, point.y):
