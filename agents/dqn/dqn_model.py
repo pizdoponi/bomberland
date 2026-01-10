@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from typing import NamedTuple
 
 import numpy as np
@@ -14,49 +13,60 @@ ACTION_ORDER = ActionType.ordered()
 NUM_ACTIONS = len(ACTION_ORDER)
 
 
-@dataclass
-class Transition:
-    state: np.ndarray
-    head_index: int
-    action: ActionType
-    reward: float
-    next_state: np.ndarray
-    next_legal_actions_mask: np.ndarray
-    done: float
-
-
 class ReplayBufferSample(NamedTuple):
-    states: np.ndarray
-    head_indices: np.ndarray
-    actions: np.ndarray
-    rewards: np.ndarray
-    next_states: np.ndarray
-    next_legal_actions_mask: np.ndarray
-    dones: np.ndarray
+    """Batch of transitions, already on GPU as tensors."""
+    states: torch.Tensor
+    head_indices: torch.Tensor
+    actions: torch.Tensor
+    rewards: torch.Tensor
+    next_states: torch.Tensor
+    next_legal_actions_mask: torch.Tensor
+    dones: torch.Tensor
 
 
 class ReplayBuffer:
-    """Circular replay buffer with efficient batch sampling.
+    """Circular replay buffer stored entirely on GPU.
 
-    Uses pre-allocated contiguous numpy arrays instead of a list of Transition objects.
-    States are stored in float16 to reduce memory footprint and improve cache performance.
+    Eliminates CPU→GPU transfer bottleneck during sampling by keeping all data
+    on device. Uses float16 for states to reduce VRAM usage (~3.2GB for 50k capacity).
     """
-    def __init__(self, capacity: int, state_shape: tuple = (72, 15, 15), num_actions: int = NUM_ACTIONS):
+    def __init__(
+        self,
+        capacity: int,
+        state_shape: tuple = (72, 15, 15),
+        num_actions: int = NUM_ACTIONS,
+        device: str = "cuda",
+    ):
         self._capacity = capacity
         self._state_shape = state_shape
         self._num_actions = num_actions
+        self._device = torch.device(device)
         self._position = 0
         self._size = 0
 
-        # Pre-allocate contiguous arrays for all data
-        # Use float16 for states to reduce memory by 50% (states are 0-1 normalized anyway)
-        self._states = np.zeros((capacity, *state_shape), dtype=np.float16)
-        self._next_states = np.zeros((capacity, *state_shape), dtype=np.float16)
-        self._head_indices = np.zeros(capacity, dtype=np.int32)
-        self._actions = np.zeros(capacity, dtype=np.int32)
-        self._rewards = np.zeros(capacity, dtype=np.float32)
-        self._next_legal_actions_mask = np.zeros((capacity, num_actions), dtype=np.float32)
-        self._dones = np.zeros(capacity, dtype=np.float32)
+        # Pre-allocate GPU tensors
+        # Use float16 for states to reduce VRAM (~3.2GB vs ~6.5GB for 50k capacity)
+        self._states = torch.zeros(
+            (capacity, *state_shape), dtype=torch.float16, device=self._device
+        )
+        self._next_states = torch.zeros(
+            (capacity, *state_shape), dtype=torch.float16, device=self._device
+        )
+        self._head_indices = torch.zeros(
+            capacity, dtype=torch.int64, device=self._device
+        )
+        self._actions = torch.zeros(
+            capacity, dtype=torch.int64, device=self._device
+        )
+        self._rewards = torch.zeros(
+            capacity, dtype=torch.float32, device=self._device
+        )
+        self._next_legal_actions_mask = torch.zeros(
+            (capacity, num_actions), dtype=torch.float32, device=self._device
+        )
+        self._dones = torch.zeros(
+            capacity, dtype=torch.float32, device=self._device
+        )
 
     def add(
         self,
@@ -69,42 +79,32 @@ class ReplayBuffer:
         done: float,
     ) -> None:
         idx = self._position
-        self._states[idx] = state.astype(np.float16)
-        self._next_states[idx] = next_state.astype(np.float16)
+        # Transfer single transition to GPU (negligible overhead)
+        self._states[idx] = torch.from_numpy(state).to(dtype=torch.float16, device=self._device)
+        self._next_states[idx] = torch.from_numpy(next_state).to(dtype=torch.float16, device=self._device)
         self._head_indices[idx] = head_index
         self._actions[idx] = action.value
         self._rewards[idx] = reward
-        self._next_legal_actions_mask[idx] = next_legal_actions_mask
+        self._next_legal_actions_mask[idx] = torch.from_numpy(next_legal_actions_mask).to(device=self._device)
         self._dones[idx] = done
 
         self._position = (self._position + 1) % self._capacity
         self._size = min(self._size + 1, self._capacity)
 
     def sample(self, batch_size: int) -> ReplayBufferSample:
-        with profile_block("replay_buffer > sample_indices"):
-            indices = np.random.choice(self._size, size=batch_size, replace=False)
-            # Sort indices for sequential memory access - dramatically improves cache performance
-            # when doing fancy indexing on large arrays
-            indices.sort()
+        # Generate random indices on GPU
+        indices = torch.randint(0, self._size, (batch_size,), device=self._device)
 
-        # Direct array indexing - convert back to float32 for training
-        with profile_block("replay_buffer > index_arrays"):
-            states = self._states[indices].astype(np.float32)
-            next_states = self._next_states[indices].astype(np.float32)
-            head_indices = self._head_indices[indices].astype(np.int64)
-            actions = self._actions[indices].astype(np.int64)
-            rewards = self._rewards[indices]
-            next_legal_actions_mask = self._next_legal_actions_mask[indices]
-            dones = self._dones[indices]
-
+        # Direct GPU tensor indexing - no CPU↔GPU transfer, no numpy conversion
+        # Convert states to float32 for training
         return ReplayBufferSample(
-            states,
-            head_indices,
-            actions,
-            rewards,
-            next_states,
-            next_legal_actions_mask,
-            dones,
+            states=self._states[indices].float(),
+            head_indices=self._head_indices[indices],
+            actions=self._actions[indices],
+            rewards=self._rewards[indices],
+            next_states=self._next_states[indices].float(),
+            next_legal_actions_mask=self._next_legal_actions_mask[indices],
+            dones=self._dones[indices],
         )
 
     def __len__(self) -> int:
