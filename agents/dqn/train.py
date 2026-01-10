@@ -150,6 +150,10 @@ class DQNTrainer:
         # Metrics tracking
         self._metrics = TrainingMetrics()
 
+        # Best model tracking
+        self._best_win_rate = 0.0
+        self._best_avg_reward = float('-inf')
+
         in_channels = self._feature_builder.num_channels * self.config.frame_stack_size
         self._model = DQNModel(
             conv_in_channels=in_channels,
@@ -244,6 +248,24 @@ class DQNTrainer:
         }
         torch.save(checkpoint, self.config.checkpoint_path)
         logger.info(f"Saved checkpoint at step {self._step_count}")
+
+    def _save_best_checkpoint(self, win_rate: float, avg_reward: float):
+        """Save best model checkpoint based on win rate (primary) and reward (secondary)."""
+        os.makedirs(os.path.dirname(self.config.best_checkpoint_path) or ".", exist_ok=True)
+        checkpoint = {
+            'model_state_dict': self._model.state_dict(),
+            'step_count': self._step_count,
+            'epsilon': self._epsilon,
+            'games_played': self._games_played,
+            'win_rate': win_rate,
+            'avg_reward': avg_reward,
+            'metrics': self._metrics.get_summary(),
+        }
+        torch.save(checkpoint, self.config.best_checkpoint_path)
+        logger.info(
+            f"New best model saved at step {self._step_count} | "
+            f"WinRate {win_rate:.1%} | AvgReward {avg_reward:.3f}"
+        )
 
     async def run(self):
         # Create events in the async context to ensure they're bound to the correct event loop
@@ -556,6 +578,23 @@ class DQNTrainer:
         # Update LR scheduler based on win rate
         if self._games_played >= 100:
             self._scheduler.step(metrics['win_rate'])
+
+        # Check for best model (only after enough games for stable metrics)
+        # Require at least 500 games to ensure rolling average is meaningful
+        if metrics['num_games_in_window'] >= 500:
+            win_rate = metrics['win_rate']
+            avg_reward = metrics['avg_reward']
+
+            # Save if better win rate, or same win rate but better reward
+            is_better = (
+                win_rate > self._best_win_rate or
+                (win_rate == self._best_win_rate and avg_reward > self._best_avg_reward)
+            )
+
+            if is_better:
+                self._best_win_rate = win_rate
+                self._best_avg_reward = avg_reward
+                self._save_best_checkpoint(win_rate, avg_reward)
 
     def _select_action(self, q_values: np.ndarray, legal_actions: List[int]) -> int:
         """Select action using epsilon-greedy with legal action masking."""

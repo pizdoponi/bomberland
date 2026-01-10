@@ -39,6 +39,7 @@ class DQNConfig:
 
     # Checkpointing
     checkpoint_path: str = "checkpoints/dqn_cnn_weights.pt"
+    best_checkpoint_path: str = "checkpoints/dqn_cnn_best.pt"
     load_path: str = "checkpoints/dqn_cnn_weights.pt"
 
     # Feature encoding
