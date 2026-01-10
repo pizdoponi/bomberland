@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import random
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -84,6 +83,9 @@ class ReplayBuffer:
     def sample(self, batch_size: int) -> ReplayBufferSample:
         with profile_block("replay_buffer > sample_indices"):
             indices = np.random.choice(self._size, size=batch_size, replace=False)
+            # Sort indices for sequential memory access - dramatically improves cache performance
+            # when doing fancy indexing on large arrays
+            indices.sort()
 
         # Direct array indexing - convert back to float32 for training
         with profile_block("replay_buffer > index_arrays"):
