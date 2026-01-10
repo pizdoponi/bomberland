@@ -413,8 +413,8 @@ def calculate_escape_routes(
             if (nx, ny) in visited:
                 continue
 
-            # Check if walkable
-            if not game_state.is_walkable(nx, ny, ignore_units=True, ignore_bombs=True):
+            # Check if walkable - do NOT ignore bombs (can't walk onto bomb tiles)
+            if not game_state.is_walkable(nx, ny, ignore_units=True, ignore_bombs=False):
                 continue
 
             visited.add((nx, ny))
@@ -437,7 +437,8 @@ def calculate_escape_routes(
 def can_escape_after_bomb(
     game_state: GameState,
     unit: UnitState,
-    bomb_position: Optional[Point] = None
+    bomb_position: Optional[Point] = None,
+    max_escape_moves: int = 3
 ) -> Tuple[bool, Optional[List[Point]]]:
     """Check if a unit can escape after placing a bomb.
 
@@ -445,6 +446,9 @@ def can_escape_after_bomb(
         game_state: Current game state.
         unit: Unit that would place the bomb.
         bomb_position: Where the bomb would be placed (default: unit position).
+        max_escape_moves: Maximum number of moves allowed to escape (default 3).
+            This ensures the unit can reach safety quickly rather than finding
+            any path that eventually exits the blast zone.
 
     Returns:
         Tuple of (can_escape, escape_path).
@@ -476,7 +480,7 @@ def can_escape_after_bomb(
             } for e in entities_here):
                 break
 
-    # BFS to find escape route
+    # BFS to find escape route (with move limit)
     from collections import deque
 
     start = (unit.x, unit.y)
@@ -485,6 +489,11 @@ def can_escape_after_bomb(
 
     while queue:
         (cx, cy), path = queue.popleft()
+
+        # Check if we've exceeded max moves (path includes starting position)
+        num_moves = len(path) - 1
+        if num_moves >= max_escape_moves:
+            continue  # Don't explore further from this path
 
         for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
             nx, ny = cx + dx, cy + dy
@@ -499,8 +508,9 @@ def can_escape_after_bomb(
             if nx == bomb_position.x and ny == bomb_position.y:
                 continue
 
-            # Check if walkable (ignoring units to be conservative)
-            if not game_state.is_walkable(nx, ny, ignore_units=True, ignore_bombs=True):
+            # Check if walkable - do NOT ignore bombs (can't walk onto bomb tiles)
+            # but ignore units (they might move)
+            if not game_state.is_walkable(nx, ny, ignore_units=True, ignore_bombs=False):
                 continue
 
             visited.add((nx, ny))

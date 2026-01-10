@@ -298,8 +298,8 @@ def find_safe_tiles(
             if (nx, ny) in visited:
                 continue
 
-            # Check walkability (ignore bombs for escape planning)
-            if not game_state.is_walkable(nx, ny, ignore_units=True, ignore_bombs=True):
+            # Check walkability - do NOT ignore bombs (can't walk onto bomb tiles)
+            if not game_state.is_walkable(nx, ny, ignore_units=True, ignore_bombs=False):
                 continue
 
             visited.add((nx, ny))
@@ -367,7 +367,8 @@ def find_escape_path(
 ) -> Optional[List[Point]]:
     """Find the best escape path for a unit in danger.
 
-    Prioritizes paths that reach safety fastest while minimizing danger exposure.
+    Uses BFS to find the shortest path to a safe tile, considering
+    that we need to move through danger zones.
 
     Args:
         game_state: Current game state.
@@ -386,20 +387,41 @@ def find_escape_path(
     if not danger_map.is_dangerous(unit.x, unit.y):
         return None
 
-    # Find nearest safe tile
-    nearest_safe = find_nearest_safe_tile(game_state, start, danger_map)
-    if nearest_safe is None:
-        return None
+    # Use BFS to find shortest path to ANY safe tile
+    # This directly returns the path rather than finding a target then pathfinding
+    from collections import deque
 
-    # Find path to it (allow some danger to escape)
-    path = find_path(
-        game_state,
-        start,
-        nearest_safe,
-        danger_map,
-        avoid_danger=False,  # We need to pass through danger to escape
-        allow_destruction=False,  # No time to destroy blocks
-        avoid_units=False  # Desperate times
-    )
+    width = game_state.world.width
+    height = game_state.world.height
 
-    return path
+    queue = deque([(start.x, start.y, [start])])
+    visited = {(start.x, start.y)}
+
+    while queue:
+        cx, cy, path = queue.popleft()
+
+        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            nx, ny = cx + dx, cy + dy
+
+            if not (0 <= nx < width and 0 <= ny < height):
+                continue
+
+            if (nx, ny) in visited:
+                continue
+
+            # Check walkability - do NOT ignore bombs (can't walk onto bomb tiles)
+            # but ignore units (might move out of the way)
+            if not game_state.is_walkable(nx, ny, ignore_units=True, ignore_bombs=False):
+                continue
+
+            visited.add((nx, ny))
+            new_path = path + [Point(nx, ny)]
+
+            # Check if this tile is safe
+            if not danger_map.is_dangerous(nx, ny):
+                return new_path
+
+            # Continue searching if still in danger
+            queue.append((nx, ny, new_path))
+
+    return None

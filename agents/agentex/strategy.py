@@ -255,6 +255,167 @@ def get_blocking_entity_at(game_state: GameState, x: int, y: int) -> Optional[En
     return None
 
 
+def has_bomb_targeting_position(game_state: GameState, unit: UnitState, target_pos: Point) -> bool:
+    """Check if we already have a bomb placed that will hit the target position.
+
+    This prevents placing multiple bombs when one is already clearing the path.
+
+    Args:
+        game_state: Current game state.
+        unit: Unit that placed the bombs (checks all team bombs actually).
+        target_pos: Position we want to clear.
+
+    Returns:
+        True if there's already a bomb that will hit target_pos.
+    """
+    from bomb_logic import get_hypothetical_blast_tiles
+
+    # Get all my team's unit IDs
+    my_unit_ids = {u.unit_id for u in game_state.my_units}
+
+    # Check all our team's bombs
+    for entity in game_state.entities:
+        if entity.entity_type != EntityType.BOMB:
+            continue
+        # Check if this bomb belongs to our team via owner_unit_id
+        if entity.owner_unit_id not in my_unit_ids:
+            continue
+
+        # Get blast tiles for this bomb
+        bomb_pos = Point(entity.x, entity.y)
+        # Use the bomb's own blast diameter
+        blast_diameter = entity.blast_diameter if entity.blast_diameter else 3
+        blast_radius = max(0, (blast_diameter - 1) // 2)
+        blast_tiles = get_hypothetical_blast_tiles(game_state, bomb_pos, blast_radius)
+
+        if target_pos in blast_tiles:
+            return True
+
+    return False
+
+
+def find_bombing_position(
+    game_state: GameState,
+    unit: UnitState,
+    block_pos: Point,
+    danger_map: DangerMap
+) -> Optional[Point]:
+    """Find a position from which we can safely bomb a blocking obstacle.
+
+    Searches for walkable positions within blast range of the block from which:
+    1. The bomb blast would reach the block
+    2. The unit can escape after placing the bomb
+
+    Args:
+        game_state: Current game state.
+        unit: Unit that wants to bomb.
+        block_pos: Position of the blocking obstacle.
+        danger_map: Pre-computed danger map.
+
+    Returns:
+        Position to move to for bombing, or None if no safe position found.
+    """
+    from danger import can_escape_after_bomb
+    from bomb_logic import get_bomb_blast_radius, get_hypothetical_blast_tiles
+
+    blast_radius = get_bomb_blast_radius(unit)
+
+    # Check all positions within blast range of the block (in cardinal directions)
+    candidate_positions: List[Point] = []
+
+    # Check positions at various distances in each cardinal direction
+    for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+        for dist in range(1, blast_radius + 1):
+            candidate = Point(block_pos.x + dx * dist, block_pos.y + dy * dist)
+
+            # Check bounds
+            if not (0 <= candidate.x < game_state.world.width and
+                    0 <= candidate.y < game_state.world.height):
+                break
+
+            # Check if position is walkable (not blocked)
+            if not is_tile_walkable_now(game_state, candidate.x, candidate.y):
+                # Also check if it's our current position (we're standing there)
+                if not (candidate.x == unit.x and candidate.y == unit.y):
+                    break  # Can't go further in this direction
+
+            # Check if bomb from this position would hit the block
+            blast_tiles = get_hypothetical_blast_tiles(game_state, candidate, blast_radius)
+            if block_pos not in blast_tiles:
+                continue
+
+            # Check if we can escape from this position after placing a bomb
+            can_escape, _ = can_escape_after_bomb(game_state, unit, candidate)
+            if can_escape:
+                candidate_positions.append(candidate)
+
+    if not candidate_positions:
+        return None
+
+    # Return the closest candidate position
+    unit_pos = Point(unit.x, unit.y)
+    return min(candidate_positions, key=lambda p: abs(p.x - unit_pos.x) + abs(p.y - unit_pos.y))
+
+
+def find_escape_creating_bomb(
+    game_state: GameState,
+    unit: UnitState
+) -> bool:
+    """Check if we should bomb to create an escape route.
+
+    When a unit is boxed in (can't safely bomb toward any target), this function
+    checks if bombing an adjacent destructible block would create an escape route,
+    allowing future strategic bombing.
+
+    Args:
+        game_state: Current game state.
+        unit: Unit that might need to create space.
+
+    Returns:
+        True if we should place a bomb to create escape space.
+    """
+    from danger import can_escape_after_bomb
+    from bomb_logic import get_bomb_blast_radius, get_hypothetical_blast_tiles
+    from utils import can_place_bomb
+
+    # Can't place bomb if we don't have one
+    if not can_place_bomb(game_state, unit):
+        return False
+
+    unit_pos = Point(unit.x, unit.y)
+    blast_radius = get_bomb_blast_radius(unit)
+    blast_tiles = get_hypothetical_blast_tiles(game_state, unit_pos, blast_radius)
+
+    # Check if bombing from current position would hit any destructible blocks
+    would_hit_block = False
+    for tile in blast_tiles:
+        entities = game_state.entities_at(tile.x, tile.y)
+        for e in entities:
+            if e.entity_type in {EntityType.WOOD_BLOCK, EntityType.ORE_BLOCK}:
+                would_hit_block = True
+                break
+        if would_hit_block:
+            break
+
+    if not would_hit_block:
+        return False
+
+    # Check if bombing would hit friendly units
+    for friendly in game_state.my_alive_units:
+        if friendly.unit_id == unit.unit_id:
+            continue
+        if Point(friendly.x, friendly.y) in blast_tiles:
+            return False
+
+    # Now the key check: can we escape if we place a bomb?
+    # The key insight: after the block is destroyed, there will be MORE escape routes
+    # So we check: is there a position we could escape TO if we wait for destruction?
+
+    # For now, use a simpler heuristic: if we can escape within the allowed moves, do it
+    can_escape, _ = can_escape_after_bomb(game_state, unit, unit_pos)
+    return can_escape
+
+
 def evaluate_enemy_target(
     game_state: GameState,
     unit: UnitState,
@@ -447,7 +608,7 @@ def decide_unit_action(
     target: Optional[Target],
     danger_map: DangerMap,
     reserved_positions: Set[Tuple[int, int]],
-    phase: GamePhase
+    phase: GamePhase  # noqa: ARG001 - kept for potential future use
 ) -> UnitDecision:
     """Decide what action a unit should take this tick.
 
@@ -462,10 +623,7 @@ def decide_unit_action(
     Returns:
         UnitDecision for this unit.
     """
-    from danger import calculate_escape_routes
     from pathfinding import find_escape_path
-
-    current_pos = Point(unit.x, unit.y)
 
     # Priority 1: Escape if in danger
     if unit_in_danger(game_state, unit, danger_map):
@@ -487,7 +645,7 @@ def decide_unit_action(
             )
 
     # Priority 2: Check if we can detonate a bomb to hit an enemy
-    detonation = check_detonation_opportunity(game_state, unit, danger_map)
+    detonation = check_detonation_opportunity(game_state, unit)
     if detonation:
         return UnitDecision(
             unit=unit,
@@ -533,6 +691,15 @@ def decide_unit_action(
         blocking_entity = get_blocking_entity_at(game_state, next_pos.x, next_pos.y)
         if blocking_entity is not None:
             # Path goes through a block - we need to bomb it first
+            # But first, check if there's already a bomb that will clear this block
+            if has_bomb_targeting_position(game_state, unit, next_pos):
+                # We already have a bomb placed that will hit this block - wait for it
+                return UnitDecision(
+                    unit=unit,
+                    priority=ActionPriority.WAIT,
+                    action_type='wait',
+                    target=target
+                )
             # Check if we should place a bomb to clear the path
             if should_place_bomb_to_clear(game_state, unit, next_pos, danger_map):
                 return UnitDecision(
@@ -543,7 +710,40 @@ def decide_unit_action(
                     place_bomb=True
                 )
             else:
-                # Can't safely bomb - wait
+                # Can't safely bomb from here - try to find a better position to bomb from
+                bomb_position = find_bombing_position(game_state, unit, next_pos, danger_map)
+                if bomb_position:
+                    # Move toward the bombing position
+                    path_to_bomb_pos = find_path(
+                        game_state,
+                        Point(unit.x, unit.y),
+                        bomb_position,
+                        danger_map,
+                        allow_destruction=False
+                    )
+                    if path_to_bomb_pos and len(path_to_bomb_pos) > 1:
+                        move_pos = path_to_bomb_pos[1]
+                        if is_tile_walkable_now(game_state, move_pos.x, move_pos.y):
+                            return UnitDecision(
+                                unit=unit,
+                                priority=ActionPriority.EXPLORE,
+                                action_type='move',
+                                target=target,
+                                next_position=move_pos
+                            )
+
+                # Can't find bombing position for target - try to create space by bombing
+                # any adjacent destructible block (to open up escape routes)
+                if find_escape_creating_bomb(game_state, unit):
+                    return UnitDecision(
+                        unit=unit,
+                        priority=ActionPriority.EXPLORE,
+                        action_type='bomb',
+                        target=target,
+                        place_bomb=True
+                    )
+
+                # Truly stuck - just wait
                 return UnitDecision(
                     unit=unit,
                     priority=ActionPriority.WAIT,
@@ -602,15 +802,13 @@ def decide_unit_action(
 
 def check_detonation_opportunity(
     game_state: GameState,
-    unit: UnitState,
-    danger_map: DangerMap
+    unit: UnitState
 ) -> Optional[Point]:
     """Check if detonating one of our bombs would hit an enemy.
 
     Args:
         game_state: Current game state.
         unit: Unit that placed the bombs.
-        danger_map: Pre-computed danger map.
 
     Returns:
         Position of bomb to detonate, or None.
@@ -731,7 +929,7 @@ def should_place_bomb_to_clear(
 def should_place_bomb(
     game_state: GameState,
     unit: UnitState,
-    target: Target,
+    target: Target,  # noqa: ARG001 - kept for API consistency
     danger_map: DangerMap
 ) -> bool:
     """Determine if a unit should place a bomb to attack target.

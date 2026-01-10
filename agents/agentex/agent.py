@@ -113,11 +113,15 @@ class Agent:
         # Get game phase
         phase = get_game_phase(tick_number)
 
+        # Compute strategy decisions for ALL units at once (not per-unit)
+        strategy = StrategyManager(game_state)
+        decisions = strategy.compute_decisions()
+
         # Process each unit
         for unit in game_state.my_alive_units:
             try:
                 action = await self._decide_unit_action(
-                    game_state, unit, danger_map, phase, tick_number
+                    game_state, unit, danger_map, phase, tick_number, decisions
                 )
                 if action:
                     await self._send_action(action)
@@ -130,7 +134,8 @@ class Agent:
         unit: UnitState,
         danger_map: DangerMap,
         phase: GamePhase,
-        tick: int
+        tick: int,
+        decisions: Dict[str, 'UnitDecision']
     ) -> Optional[ActionPacket]:
         """Decide what action a unit should take.
 
@@ -140,6 +145,7 @@ class Agent:
             danger_map: Pre-computed danger map.
             phase: Current game phase.
             tick: Current tick.
+            decisions: Pre-computed decisions from StrategyManager.
 
         Returns:
             Action to execute, or None.
@@ -165,13 +171,20 @@ class Agent:
             if action:
                 return action
 
-        # Use strategy manager for target selection
-        strategy = StrategyManager(game_state)
-        decisions = strategy.compute_decisions()
-
+        # Use pre-computed decisions
         if unit_id in decisions:
             decision = decisions[unit_id]
+            # Log decision details for debugging
+            if decision.target:
+                target_info = f"target={decision.target.target_type}@{decision.target.position}"
+                path_info = f"path_len={len(decision.target.path) if decision.target.path else 0}"
+            else:
+                target_info = "no_target"
+                path_info = ""
+            logger.debug(f"Unit {unit_id} decision: {decision.action_type} {target_info} {path_info}")
             return self._execute_decision(game_state, unit, decision, danger_map, phase)
+        else:
+            logger.debug(f"Unit {unit_id} has no decision from strategy manager")
 
         # Fallback: Random safe movement
         return self._handle_fallback(game_state, unit, danger_map)
@@ -356,6 +369,12 @@ class Agent:
         Returns:
             Fallback action.
         """
+        from strategy import (
+            get_blocking_entity_at,
+            should_place_bomb_to_clear,
+            has_bomb_targeting_position
+        )
+
         unit_id = unit.unit_id
         current = Point(unit.x, unit.y)
 
@@ -384,6 +403,30 @@ class Agent:
                     direction = get_direction_to_point(current, next_pos)
                     if direction:
                         return MoveAction(unit_id=unit_id, move=direction)
+
+            # No direct path - try with destruction
+            path_with_destruction = find_path(
+                game_state,
+                current,
+                nearest_enemy.position,
+                danger_map,
+                allow_destruction=True
+            )
+
+            if path_with_destruction and len(path_with_destruction) > 1:
+                next_pos = path_with_destruction[1]
+
+                # Check if next position is blocked by a destructible block
+                blocking_entity = get_blocking_entity_at(game_state, next_pos.x, next_pos.y)
+                if blocking_entity is not None:
+                    # Check if we already have a bomb targeting this
+                    if has_bomb_targeting_position(game_state, unit, next_pos):
+                        # Wait for bomb to clear the path
+                        return None
+                    # Try to bomb it
+                    if should_place_bomb_to_clear(game_state, unit, next_pos, danger_map):
+                        logger.info(f"Unit {unit_id} placing bomb to clear path (fallback)")
+                        return BombAction(unit_id=unit_id)
 
         # Last resort: find any safe tile to move to
         safe_tile = find_nearest_safe_tile(game_state, current, danger_map)
