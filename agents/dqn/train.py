@@ -124,6 +124,7 @@ class DQNTrainer:
             self.config.replay_capacity,
             state_shape=state_shape,
             num_actions=NUM_ACTIONS,
+            device=self.config.device,
         )
 
         self._last_state: Dict[str, np.ndarray] = {}
@@ -482,16 +483,14 @@ class DQNTrainer:
         with profile_block("train_step > sample_replay"):
             batch = self._replay_buffer.sample(self.config.batch_size)
 
-        # Use pin_memory + non_blocking for faster CPU→GPU transfer
-        with profile_block("train_step > to_device"):
-            device = self.config.device
-            state_batch = torch.from_numpy(batch.states).float().pin_memory().to(device, non_blocking=True)
-            next_state_batch = torch.from_numpy(batch.next_states).float().pin_memory().to(device, non_blocking=True)
-            head_index_batch = torch.from_numpy(batch.head_indices).long().pin_memory().to(device, non_blocking=True)
-            action_batch = torch.from_numpy(batch.actions).long().pin_memory().to(device, non_blocking=True)
-            reward_batch = torch.from_numpy(batch.rewards).float().pin_memory().to(device, non_blocking=True)
-            next_legal_action_mask_batch = torch.from_numpy(batch.next_legal_actions_mask).float().pin_memory().to(device, non_blocking=True)
-            done_batch = torch.from_numpy(batch.dones).float().pin_memory().to(device, non_blocking=True)
+        # Data is already on GPU from the replay buffer - just unpack
+        state_batch = batch.states
+        next_state_batch = batch.next_states
+        head_index_batch = batch.head_indices
+        action_batch = batch.actions
+        reward_batch = batch.rewards
+        next_legal_action_mask_batch = batch.next_legal_actions_mask
+        done_batch = batch.dones
 
         batch_indices = torch.arange(self.config.batch_size, device=self.config.device)
 
