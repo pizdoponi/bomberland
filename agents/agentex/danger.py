@@ -225,16 +225,42 @@ class DangerMap:
         return self._danger_cache.get((x, y), DangerInfo())
 
     def is_dangerous(self, x: int, y: int) -> bool:
-        """Check if a tile is in any danger zone.
+        """Check if a tile is currently dangerous (at current tick).
 
         Args:
             x: X coordinate.
             y: Y coordinate.
 
         Returns:
-            True if tile is dangerous, False otherwise.
+            True if tile is dangerous at current tick, False otherwise.
         """
-        return self.get_danger_info(x, y).is_dangerous
+        info = self.get_danger_info(x, y)
+
+        # Not dangerous at all
+        if not info.is_dangerous:
+            return False
+
+        # Fire is always dangerous
+        if info.is_fire:
+            return True
+
+        # Active blast is dangerous
+        if info.is_active_blast:
+            return True
+
+        # Check if current tick is within the danger window
+        current_tick = self.tick
+
+        # If danger hasn't started yet, not dangerous now
+        if info.danger_start_tick and current_tick < info.danger_start_tick:
+            return False
+
+        # If danger has ended, not dangerous now
+        if info.danger_end_tick and current_tick >= info.danger_end_tick:
+            return False
+
+        # Within danger window
+        return True
 
     def is_immediately_dangerous(self, x: int, y: int) -> bool:
         """Check if a tile has immediate danger (active blast or fire).

@@ -450,6 +450,12 @@ class Agent:
                         self._reserved_positions.add((next_pos.x, next_pos.y))
                         return MoveAction(unit_id=unit_id, move=direction)
 
+        # Last resort: if completely stuck, try to bomb any adjacent block to create space
+        from strategy import find_escape_creating_bomb
+        if find_escape_creating_bomb(game_state, unit, danger_map):
+            logger.info(f"Unit {unit_id} placing bomb to create escape route (stuck fallback)")
+            return BombAction(unit_id=unit_id)
+
         return None
 
     async def _send_action(self, action: ActionPacket) -> None:
