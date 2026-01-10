@@ -10,7 +10,7 @@ class DQNConfig:
     # Exploration parameters
     epsilon_start: float = 1.0
     epsilon_min: float = 0.05
-    epsilon_decay: float = 0.999990  # Math: 0.999990^300000 ≈ 0.05    
+    epsilon_decay: float = 0.999990  # Math: 0.999990^300000 ≈ 0.05
 
     # Learning parameters
     gamma: float = 0.99
@@ -19,6 +19,13 @@ class DQNConfig:
     warmup_steps: int = 5_000
     learning_rate: float = 0.0003  # Slightly conservative for stability
     train_every_n_steps: int = 8  # 1 gradient update per 8 env steps (maintains ratio with 2x batch)
+
+    # Prioritized Experience Replay (PER) parameters
+    per_alpha: float = 0.6  # Priority exponent (0=uniform, 1=full prioritization)
+    per_beta_start: float = 0.4  # Importance sampling start (low = more prioritization)
+    per_beta_end: float = 1.0  # Importance sampling end (1.0 = full correction)
+    per_beta_steps: int = 500_000  # Steps to anneal beta (should match max_steps)
+    per_epsilon: float = 1e-6  # Small constant to ensure non-zero priority
 
     # Network architecture
     fc_hidden_dim: int = 256

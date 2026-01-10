@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 from dotenv import load_dotenv
 from dqn_config import DQNConfig
-from dqn_model import NUM_ACTIONS, ActionType, DQNModel, ReplayBuffer
+from dqn_model import NUM_ACTIONS, ActionType, DQNModel, PrioritizedReplayBuffer
 from dqn_shared import DQNFeatureBuilder
 from game_state import GameState
 from torch.optim.adamw import AdamW
@@ -120,11 +120,16 @@ class DQNTrainer:
             15,  # height
             15,  # width
         )
-        self._replay_buffer = ReplayBuffer(
+        self._replay_buffer = PrioritizedReplayBuffer(
             self.config.replay_capacity,
             state_shape=state_shape,
             num_actions=NUM_ACTIONS,
             device=self.config.device,
+            alpha=self.config.per_alpha,
+            beta_start=self.config.per_beta_start,
+            beta_end=self.config.per_beta_end,
+            beta_steps=self.config.per_beta_steps,
+            priority_epsilon=self.config.per_epsilon,
         )
 
         self._last_state: Dict[str, np.ndarray] = {}
@@ -472,6 +477,7 @@ class DQNTrainer:
         reward_batch = batch.rewards
         next_legal_action_mask_batch = batch.next_legal_actions_mask
         done_batch = batch.dones
+        importance_weights = batch.weights  # PER importance sampling weights
 
         batch_indices = torch.arange(self.config.batch_size, device=self.config.device)
 
@@ -497,21 +503,31 @@ class DQNTrainer:
                 reward_batch + (1.0 - done_batch) * self.config.gamma * next_q_values
             )
 
-        # Huber loss for stability
-        loss = F.smooth_l1_loss(predicted_q, target_values)
+        # Compute TD errors for priority updates
+        td_errors = predicted_q - target_values
 
-        # Track TD error for metrics
+        # PER: Weight the loss by importance sampling weights
+        # Using element-wise Huber loss then weighting, instead of reduction='none'
+        elementwise_loss = F.smooth_l1_loss(predicted_q, target_values, reduction='none')
+        weighted_loss = (elementwise_loss * importance_weights).mean()
+
+        # Track TD error for metrics (unweighted mean for interpretability)
         with torch.no_grad():
-            td_error = torch.abs(predicted_q - target_values).mean().item()
-            self._metrics.add_td_error(td_error)
+            td_error_mean = torch.abs(td_errors).mean().item()
+            self._metrics.add_td_error(td_error_mean)
 
         self._optimizer.zero_grad()
-        loss.backward()
+        weighted_loss.backward()
         # Gradient clipping for stability
         torch.nn.utils.clip_grad_norm_(self._model.parameters(), max_norm=10.0)
         self._optimizer.step()
 
-        self._metrics.add_loss(loss.item())
+        # PER: Update priorities with new TD errors
+        with torch.no_grad():
+            td_errors_np = td_errors.abs().cpu().numpy()
+            self._replay_buffer.update_priorities(batch.indices, td_errors_np)
+
+        self._metrics.add_loss(weighted_loss.item())
 
         if self._step_count % self.config.log_interval == 0:
             self._log_progress()
