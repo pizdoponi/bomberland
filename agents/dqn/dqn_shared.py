@@ -6,7 +6,7 @@ from typing import Deque, List, Set
 import numpy as np
 from dqn_config import DQNConfig
 from dqn_model import ActionType
-from types_ import EntityType, Point
+from types_ import Entity, EntityType, Point
 from types_ import GameState as TypedGameState
 
 MOVE_DELTAS = {
@@ -209,13 +209,16 @@ class DQNFeatureBuilder:
         1. TERMINAL-FOCUSED: Win/lose dominates (+1/-0.9)
         2. INDIVIDUAL ATTRIBUTION: Units get credit for their own damage/kills
         3. BOUNDED [-1, 1]: All rewards clipped to this range
-        4. ASYMMETRIC: Dealing damage > taking damage (encourages aggression)
+        4. SURVIVAL > AGGRESSION: Staying alive is more important than dealing damage
+        5. DENSE FEEDBACK: Small rewards for intermediate progress
 
-        Reward components:
+        Reward components (per unit):
         - Terminal: +1.0 win, -0.9 lose, -0.3 draw (shared)
-        - Enemy damage dealt: +0.1/HP (attributed to attacker)
-        - Friendly fire caused: -0.12/HP (attributed to attacker)
-        - Damage taken: -0.09/HP (attributed to victim)
+        - Enemy damage dealt: +0.15/HP (attributed to attacker whose bomb detonated this tick)
+        - Damage taken: -0.12/HP (victim, any source - teaches avoidance)
+        - Friendly fire caused: -0.18/HP (attacker whose bomb detonated this tick hit ally)
+        - Obstacle destruction: +0.01/block (encourages path creation)
+        - Tick penalty: -0.0005/tick (encourages finishing games, very small)
 
         Returns:
             team_reward: shared objective reward (clipped to [-1, 1])
@@ -247,8 +250,8 @@ class DQNFeatureBuilder:
         enemy_hp_lost = max(0, prev_enemy_hp - curr_enemy_hp)
         my_hp_lost = max(0, prev_my_hp - curr_my_hp)
 
-        # Small team-level HP shaping (0.02 per HP)
-        team_hp_reward = 0.02 * enemy_hp_lost - 0.015 * my_hp_lost
+        # Team-level HP shaping
+        team_hp_reward = 0.03 * enemy_hp_lost - 0.025 * my_hp_lost
 
         # ---------- Team reward ----------
         team_reward = terminal + team_hp_reward
@@ -262,6 +265,9 @@ class DQNFeatureBuilder:
         # Get bomb positions that exist in current state (not yet detonated)
         curr_bomb_positions = {bomb.position for bomb in curr_game_state._all_bombs or []}
 
+        # Track which bombs detonated this tick for obstacle attribution
+        detonated_bombs: List[Entity] = []
+
         # Check bombs from previous state that are no longer present (detonated this tick)
         for bomb in prev_game_state._all_bombs or []:
             owner = bomb.owner_unit_id
@@ -270,6 +276,8 @@ class DQNFeatureBuilder:
             # Only attribute if this bomb detonated this tick (was in prev, not in curr)
             if bomb.position in curr_bomb_positions:
                 continue  # Bomb still exists, didn't detonate
+
+            detonated_bombs.append(bomb)
 
             # This bomb detonated - attribute its blast tiles to the owner
             blast_tiles = prev_game_state.get_blast_tiles_if_detonated(
@@ -288,11 +296,14 @@ class DQNFeatureBuilder:
         # Track damage dealt to enemies by each of my units (positive)
         damage_dealt_by_unit: dict[str, float] = {uid: 0.0 for uid in all_my_unit_ids}
 
-        # Track friendly fire caused by each of my units (damage to self or allies)
+        # Track friendly fire caused by each of my units (damage to allies from our bombs this tick)
         friendly_fire_by_unit: dict[str, float] = {uid: 0.0 for uid in all_my_unit_ids}
 
         # Track HP lost by each of my units (any source)
         hp_lost_by_unit: dict[str, int] = {uid: 0 for uid in all_my_unit_ids}
+
+        # Track obstacles destroyed by each of my units
+        obstacles_destroyed_by_unit: dict[str, float] = {uid: 0.0 for uid in all_my_unit_ids}
 
         # Calculate HP lost per unit (any source: own bomb, ally bomb, enemy bomb, walking into blast, fire)
         for ally in prev_game_state.my_units:
@@ -308,33 +319,59 @@ class DQNFeatureBuilder:
 
             if hp_lost > 0:
                 enemy_pos = Point(enemy.x, enemy.y)
-                # Check if enemy was hit by a blast we own
+                # Check if enemy was hit by a blast we own (this tick)
                 if enemy_pos in blast_ownership:
                     my_units_responsible = blast_ownership[enemy_pos] & all_my_unit_ids
                     if my_units_responsible:
                         # Split credit among responsible units
                         credit_per_unit = hp_lost / len(my_units_responsible)
                         for uid in my_units_responsible:
-                            damage_dealt_by_unit[uid] = damage_dealt_by_unit[uid] + credit_per_unit
+                            damage_dealt_by_unit[uid] += credit_per_unit
 
-        # Calculate friendly fire: damage to allies caused by my units' bombs
-        # Only attribute if the bomb owner caused the blast (not if ally walked into existing blast)
+        # Calculate friendly fire: damage to allies caused by my units' bombs THIS TICK
+        # Only attribute if the bomb detonated this tick (not if ally walked into existing blast)
         for ally in prev_game_state.my_units:
             hp_lost = hp_lost_by_unit[ally.unit_id]
 
             if hp_lost > 0:
                 ally_pos = Point(ally.x, ally.y)
-                # Check if ally was hit by a blast from one of our units
+                # Check if ally was hit by a blast from one of our bombs that detonated this tick
                 if ally_pos in blast_ownership:
                     my_units_responsible = blast_ownership[ally_pos] & all_my_unit_ids
                     if my_units_responsible:
                         # Penalize the unit(s) whose bomb caused the friendly fire
                         penalty_per_unit = hp_lost / len(my_units_responsible)
                         for uid in my_units_responsible:
-                            friendly_fire_by_unit[uid] = friendly_fire_by_unit[uid] + penalty_per_unit
+                            friendly_fire_by_unit[uid] += penalty_per_unit
+
+        # Calculate obstacles destroyed by my units' bombs this tick
+        # Count wood and ore blocks that were in prev_state but not in curr_state
+        prev_blocks: dict[Point, EntityType] = {}
+        for entity in prev_game_state.entities:
+            if entity.entity_type in {EntityType.WOOD_BLOCK, EntityType.ORE_BLOCK}:
+                prev_blocks[entity.position] = entity.entity_type
+
+        curr_block_positions: Set[Point] = set()
+        for entity in curr_game_state.entities:
+            if entity.entity_type in {EntityType.WOOD_BLOCK, EntityType.ORE_BLOCK}:
+                curr_block_positions.add(entity.position)
+
+        # Find blocks that were destroyed
+        for block_pos, _block_type in prev_blocks.items():
+            if block_pos not in curr_block_positions:
+                # Block was destroyed - check if our bomb did it
+                if block_pos in blast_ownership:
+                    my_units_responsible = blast_ownership[block_pos] & all_my_unit_ids
+                    if my_units_responsible:
+                        credit_per_unit = 1.0 / len(my_units_responsible)
+                        for uid in my_units_responsible:
+                            obstacles_destroyed_by_unit[uid] += credit_per_unit
 
         # ---------- Per-unit rewards with individual attribution ----------
         unit_rewards: dict[str, float] = {}
+
+        # Very small tick penalty to encourage finishing games (shared by alive units)
+        tick_penalty = -0.0005
 
         for unit in curr_game_state.my_units:
             unit_id = unit.unit_id
@@ -342,20 +379,28 @@ class DQNFeatureBuilder:
             # Start with terminal reward (shared goal)
             unit_reward = terminal  # +1.0 win, -0.9 lose, -0.3 draw
 
-            # Individual damage dealt to enemies: primary positive signal
-            # +0.1 per HP dealt (max 0.3 for a kill, 0.9 for killing all 3 enemies)
+            # Tick penalty (encourages finishing games, very minor)
+            unit_reward += tick_penalty
+
+            # Individual damage dealt to enemies: +0.15 per HP
+            # (max 0.45 for a kill, 1.35 for killing all 3 enemies - will be clipped)
             individual_damage_dealt = damage_dealt_by_unit.get(unit_id, 0.0)
-            unit_reward += 0.1 * individual_damage_dealt
+            unit_reward += 0.15 * individual_damage_dealt
 
-            # Friendly fire penalty: damage this unit's bomb caused to self or teammates
-            # -0.12 per HP (higher than enemy damage reward to strongly discourage)
-            individual_friendly_fire = friendly_fire_by_unit.get(unit_id, 0.0)
-            unit_reward -= 0.12 * individual_friendly_fire
-
-            # Damage taken penalty: HP this unit lost (any source)
-            # -0.09 per HP (teaches unit to avoid danger, stay out of blasts)
+            # Damage taken penalty: -0.12 per HP this unit lost (any source)
+            # Teaches unit to avoid danger zones, not walk into blasts
             individual_hp_lost = hp_lost_by_unit.get(unit_id, 0)
-            unit_reward -= 0.09 * individual_hp_lost
+            unit_reward -= 0.12 * individual_hp_lost
+
+            # Friendly fire penalty: -0.18 per HP this unit's bomb caused to allies
+            # Only counts if our bomb detonated this tick (not ally walking into old blast)
+            individual_friendly_fire = friendly_fire_by_unit.get(unit_id, 0.0)
+            unit_reward -= 0.18 * individual_friendly_fire
+
+            # Obstacle destruction bonus: +0.01 per block destroyed
+            # Encourages path creation to reach enemies
+            individual_obstacles = obstacles_destroyed_by_unit.get(unit_id, 0.0)
+            unit_reward += 0.01 * individual_obstacles
 
             # Clip to [-1, 1]
             unit_rewards[unit_id] = max(-1.0, min(1.0, unit_reward))
@@ -366,12 +411,16 @@ class DQNFeatureBuilder:
                 unit_id = unit.unit_id
                 # Unit died - start with terminal
                 death_reward = terminal
+                # Add tick penalty
+                death_reward += tick_penalty
                 # Add any damage this unit dealt before dying
-                death_reward += 0.1 * damage_dealt_by_unit.get(unit_id, 0.0)
+                death_reward += 0.15 * damage_dealt_by_unit.get(unit_id, 0.0)
+                # Subtract HP lost (includes death HP)
+                death_reward -= 0.12 * hp_lost_by_unit.get(unit_id, 0)
                 # Subtract any friendly fire this unit caused
-                death_reward -= 0.12 * friendly_fire_by_unit.get(unit_id, 0.0)
-                # Subtract HP lost (3 HP for death)
-                death_reward -= 0.09 * hp_lost_by_unit.get(unit_id, 0)
+                death_reward -= 0.18 * friendly_fire_by_unit.get(unit_id, 0.0)
+                # Add obstacle destruction
+                death_reward += 0.01 * obstacles_destroyed_by_unit.get(unit_id, 0.0)
                 unit_rewards[unit_id] = max(-1.0, min(1.0, death_reward))
 
         return team_reward, unit_rewards, done
