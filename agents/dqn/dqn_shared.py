@@ -200,209 +200,178 @@ class DQNFeatureBuilder:
         self,
         prev_game_state: TypedGameState,
         curr_game_state: TypedGameState,
-        actions_taken: dict[str, ActionType],
+        _actions_taken: dict[str, ActionType],
     ) -> tuple[float, dict[str, float], bool]:
         """
         Compute rewards for team and individual units.
 
         Reward design principles:
-        1. Terminal rewards for winning/losing (main objective)
-        2. Dense HP-based rewards (intermediate progress)
-        3. Per-unit shaping for immediate feedback on dangerous/good actions
-        4. Asymmetric penalties: survival > aggression
-        5. Small magnitudes so terminal rewards dominate long-term
+        1. TERMINAL-FOCUSED: Win/lose dominates (+1/-0.9)
+        2. INDIVIDUAL ATTRIBUTION: Units get credit for their own damage/kills
+        3. BOUNDED [-1, 1]: All rewards clipped to this range
+        4. ASYMMETRIC: Dealing damage > taking damage (encourages aggression)
+
+        Reward components:
+        - Terminal: +1.0 win, -0.9 lose, -0.3 draw (shared)
+        - Enemy damage dealt: +0.1/HP (attributed to attacker)
+        - Friendly fire caused: -0.12/HP (attributed to attacker)
+        - Damage taken: -0.09/HP (attributed to victim)
 
         Returns:
-            team_reward: shared objective reward
-            unit_rewards: per-unit reward (team_reward + individual shaping)
-            done: terminal flag (all enemies dead or all my units dead)
+            team_reward: shared objective reward (clipped to [-1, 1])
+            unit_rewards: per-unit reward with individual attribution (clipped to [-1, 1])
+            done: terminal flag
         """
-        tick = curr_game_state.tick
-
         # ---------- Count alive units ----------
-        prev_enemy_alive = len(prev_game_state.enemy_alive_units)
         curr_enemy_alive = len(curr_game_state.enemy_alive_units)
         curr_my_alive = len(curr_game_state.my_alive_units)
 
         done = (curr_enemy_alive == 0) or (curr_my_alive == 0)
 
-        # ---------- Terminal rewards ----------
+        # ---------- Terminal rewards (primary signal) ----------
         terminal = 0.0
-        if curr_enemy_alive == 0 and curr_my_alive > 0:
-            terminal = 3.0 + 0.5 * curr_my_alive
-        elif curr_my_alive == 0 and curr_enemy_alive > 0:
-            terminal = -3.0 - 0.5 * curr_enemy_alive
-        elif curr_my_alive == 0 and curr_enemy_alive == 0:
-            terminal = -1.0
+        if done:
+            if curr_enemy_alive == 0 and curr_my_alive > 0:
+                terminal = 1.0  # Won
+            elif curr_my_alive == 0 and curr_enemy_alive > 0:
+                terminal = -0.9  # Lost
+            else:
+                terminal = -0.3  # Draw
 
-        # ---------- HP-based dense rewards ----------
-        prev_my_hp = sum(u.hp for u in prev_game_state.my_units)
-        curr_my_hp = sum(u.hp for u in curr_game_state.my_units)
+        # ---------- Team HP differential (small, shared) ----------
         prev_enemy_hp = sum(u.hp for u in prev_game_state.enemy_units)
         curr_enemy_hp = sum(u.hp for u in curr_game_state.enemy_units)
+        prev_my_hp = sum(u.hp for u in prev_game_state.my_units)
+        curr_my_hp = sum(u.hp for u in curr_game_state.my_units)
 
         enemy_hp_lost = max(0, prev_enemy_hp - curr_enemy_hp)
         my_hp_lost = max(0, prev_my_hp - curr_my_hp)
 
-        damage_reward = 0.2 * enemy_hp_lost
-        damage_penalty = 0.4 * my_hp_lost
-
-        # ---------- Block destruction reward ----------
-        prev_destructible = sum(
-            1 for e in prev_game_state.entities
-            if e.entity_type in {EntityType.WOOD_BLOCK, EntityType.ORE_BLOCK}
-        )
-        curr_destructible = sum(
-            1 for e in curr_game_state.entities
-            if e.entity_type in {EntityType.WOOD_BLOCK, EntityType.ORE_BLOCK}
-        )
-        blocks_destroyed = max(0, prev_destructible - curr_destructible)
-        block_reward = 0.03 * blocks_destroyed
-
-        # ---------- Survival bonus ----------
-        survival_bonus = 0.01 * curr_my_alive if not done else 0.0
+        # Small team-level HP shaping (0.02 per HP)
+        team_hp_reward = 0.02 * enemy_hp_lost - 0.015 * my_hp_lost
 
         # ---------- Team reward ----------
-        team_reward = terminal + damage_reward - damage_penalty + block_reward + survival_bonus
+        team_reward = terminal + team_hp_reward
+        team_reward = max(-1.0, min(1.0, team_reward))
 
-        # ---------- Compute danger zone for current state ----------
-        danger_tiles: set[Point] = set()
-        for bomb in curr_game_state._all_bombs or []:
-            if bomb.is_armed(tick):
-                blast_tiles = curr_game_state.get_blast_tiles_if_detonated(
-                    bomb.position, require_armed=False
-                )
-                danger_tiles.update(blast_tiles)
+        # ---------- Compute blast ownership for damage attribution ----------
+        # Map each tile with active blast to the unit(s) whose bomb caused it THIS TICK
+        # Only attribute if bomb existed in prev_state but detonated (not in curr_state)
+        blast_ownership: dict[Point, set[str]] = {}
 
-        # Also add tiles with active blasts
-        for entity in curr_game_state.entities:
-            if entity.entity_type == EntityType.BLAST:
-                danger_tiles.add(Point(entity.x, entity.y))
+        # Get bomb positions that exist in current state (not yet detonated)
+        curr_bomb_positions = {bomb.position for bomb in curr_game_state._all_bombs or []}
 
-        # ---------- Compute danger zone for previous state ----------
-        prev_danger_tiles: set[Point] = set()
+        # Check bombs from previous state that are no longer present (detonated this tick)
         for bomb in prev_game_state._all_bombs or []:
-            if bomb.is_armed(prev_game_state.tick):
-                blast_tiles = prev_game_state.get_blast_tiles_if_detonated(
-                    bomb.position, require_armed=False
-                )
-                prev_danger_tiles.update(blast_tiles)
+            owner = bomb.owner_unit_id
+            if owner is None:
+                continue
+            # Only attribute if this bomb detonated this tick (was in prev, not in curr)
+            if bomb.position in curr_bomb_positions:
+                continue  # Bomb still exists, didn't detonate
 
-        for entity in prev_game_state.entities:
-            if entity.entity_type == EntityType.BLAST:
-                prev_danger_tiles.add(Point(entity.x, entity.y))
+            # This bomb detonated - attribute its blast tiles to the owner
+            blast_tiles = prev_game_state.get_blast_tiles_if_detonated(
+                bomb.position, require_armed=False
+            )
+            for blast_pos in blast_tiles:
+                if blast_pos not in blast_ownership:
+                    blast_ownership[blast_pos] = set()
+                blast_ownership[blast_pos].add(owner)
 
-        # ---------- Get enemy positions for distance calculation ----------
-        enemy_positions = [
-            Point(u.x, u.y) for u in curr_game_state.enemy_alive_units
-        ]
-        prev_enemy_positions = [
-            Point(u.x, u.y) for u in prev_game_state.enemy_alive_units
-        ]
+        # ---------- Compute per-unit damage dealt/taken ----------
+        my_unit_ids = {u.unit_id for u in curr_game_state.my_units}
+        # Also include units that may have just died
+        all_my_unit_ids = my_unit_ids | {u.unit_id for u in prev_game_state.my_units}
 
-        # ---------- Per-unit shaping rewards ----------
+        # Track damage dealt to enemies by each of my units (positive)
+        damage_dealt_by_unit: dict[str, float] = {uid: 0.0 for uid in all_my_unit_ids}
+
+        # Track friendly fire caused by each of my units (damage to self or allies)
+        friendly_fire_by_unit: dict[str, float] = {uid: 0.0 for uid in all_my_unit_ids}
+
+        # Track HP lost by each of my units (any source)
+        hp_lost_by_unit: dict[str, int] = {uid: 0 for uid in all_my_unit_ids}
+
+        # Calculate HP lost per unit (any source: own bomb, ally bomb, enemy bomb, walking into blast, fire)
+        for ally in prev_game_state.my_units:
+            curr_ally = curr_game_state.get_unit(ally.unit_id)
+            curr_hp = curr_ally.hp if curr_ally else 0
+            hp_lost_by_unit[ally.unit_id] = max(0, ally.hp - curr_hp)
+
+        # Calculate damage dealt to enemies and attribute to my units
+        for enemy in prev_game_state.enemy_units:
+            curr_enemy = curr_game_state.get_unit(enemy.unit_id)
+            curr_hp = curr_enemy.hp if curr_enemy else 0
+            hp_lost = max(0, enemy.hp - curr_hp)
+
+            if hp_lost > 0:
+                enemy_pos = Point(enemy.x, enemy.y)
+                # Check if enemy was hit by a blast we own
+                if enemy_pos in blast_ownership:
+                    my_units_responsible = blast_ownership[enemy_pos] & all_my_unit_ids
+                    if my_units_responsible:
+                        # Split credit among responsible units
+                        credit_per_unit = hp_lost / len(my_units_responsible)
+                        for uid in my_units_responsible:
+                            damage_dealt_by_unit[uid] = damage_dealt_by_unit[uid] + credit_per_unit
+
+        # Calculate friendly fire: damage to allies caused by my units' bombs
+        # Only attribute if the bomb owner caused the blast (not if ally walked into existing blast)
+        for ally in prev_game_state.my_units:
+            hp_lost = hp_lost_by_unit[ally.unit_id]
+
+            if hp_lost > 0:
+                ally_pos = Point(ally.x, ally.y)
+                # Check if ally was hit by a blast from one of our units
+                if ally_pos in blast_ownership:
+                    my_units_responsible = blast_ownership[ally_pos] & all_my_unit_ids
+                    if my_units_responsible:
+                        # Penalize the unit(s) whose bomb caused the friendly fire
+                        penalty_per_unit = hp_lost / len(my_units_responsible)
+                        for uid in my_units_responsible:
+                            friendly_fire_by_unit[uid] = friendly_fire_by_unit[uid] + penalty_per_unit
+
+        # ---------- Per-unit rewards with individual attribution ----------
         unit_rewards: dict[str, float] = {}
 
         for unit in curr_game_state.my_units:
             unit_id = unit.unit_id
-            unit_reward = team_reward  # Start with team reward
 
-            prev_unit = prev_game_state.get_unit(unit_id)
-            if prev_unit is None:
-                unit_rewards[unit_id] = unit_reward
-                continue
+            # Start with terminal reward (shared goal)
+            unit_reward = terminal  # +1.0 win, -0.9 lose, -0.3 draw
 
-            curr_pos = Point(unit.x, unit.y)
-            prev_pos = Point(prev_unit.x, prev_unit.y)
-            action = actions_taken.get(unit_id)
+            # Individual damage dealt to enemies: primary positive signal
+            # +0.1 per HP dealt (max 0.3 for a kill, 0.9 for killing all 3 enemies)
+            individual_damage_dealt = damage_dealt_by_unit.get(unit_id, 0.0)
+            unit_reward += 0.1 * individual_damage_dealt
 
-            # --- Danger zone shaping ---
-            in_danger_now = curr_pos in danger_tiles
-            was_in_danger = prev_pos in prev_danger_tiles
+            # Friendly fire penalty: damage this unit's bomb caused to self or teammates
+            # -0.12 per HP (higher than enemy damage reward to strongly discourage)
+            individual_friendly_fire = friendly_fire_by_unit.get(unit_id, 0.0)
+            unit_reward -= 0.12 * individual_friendly_fire
 
-            if in_danger_now and not was_in_danger:
-                # Moved INTO danger - bad
-                unit_reward -= 0.08
-            elif was_in_danger and not in_danger_now:
-                # Escaped danger - good
-                unit_reward += 0.1
-            elif in_danger_now:
-                # Still in danger - ongoing penalty
-                unit_reward -= 0.05
+            # Damage taken penalty: HP this unit lost (any source)
+            # -0.09 per HP (teaches unit to avoid danger, stay out of blasts)
+            individual_hp_lost = hp_lost_by_unit.get(unit_id, 0)
+            unit_reward -= 0.09 * individual_hp_lost
 
-            # --- Standing on blast penalty ---
-            blast_at_pos = any(
-                e.entity_type == EntityType.BLAST
-                for e in curr_game_state._entity_grid.get((unit.x, unit.y), [])
-            )
-            if blast_at_pos:
-                unit_reward -= 0.15
+            # Clip to [-1, 1]
+            unit_rewards[unit_id] = max(-1.0, min(1.0, unit_reward))
 
-            # --- Self-detonation check ---
-            if action is not None and action.is_bomb_detonation():
-                # Check if unit detonated a bomb that hit itself
-                my_bombs = curr_game_state._bombs_by_owner.get(unit_id, [])
-                for bomb in my_bombs:
-                    if bomb.is_armed(tick):
-                        blast = prev_game_state.get_blast_tiles_if_detonated(
-                            bomb.position, require_armed=False
-                        )
-                        if prev_pos in blast:
-                            # Detonated bomb while standing in its blast radius
-                            unit_reward -= 0.3
-
-            # --- Distance to enemy shaping ---
-            if enemy_positions and prev_enemy_positions:
-                # Current min distance to any enemy
-                curr_min_dist = min(
-                    curr_pos.distance_to(ep) for ep in enemy_positions
-                ) if enemy_positions else 100
-
-                # Previous min distance
-                prev_min_dist = min(
-                    prev_pos.distance_to(ep) for ep in prev_enemy_positions
-                ) if prev_enemy_positions else 100
-
-                dist_delta = prev_min_dist - curr_min_dist
-                if dist_delta > 0:
-                    # Got closer to enemy - small reward
-                    unit_reward += 0.02 * dist_delta
-                elif dist_delta < 0 and not in_danger_now:
-                    # Moved away (not fleeing danger) - tiny penalty
-                    unit_reward -= 0.01 * abs(dist_delta)
-
-            # --- Bomb placement near destructibles ---
-            if action == ActionType.PLACE_BOMB:
-                # Check if there are destructible blocks nearby
-                nearby_destructibles = 0
-                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                    for dist in range(1, 4):  # Check up to blast radius
-                        nx, ny = prev_pos.x + dx * dist, prev_pos.y + dy * dist
-                        entities = prev_game_state._entity_grid.get((nx, ny), [])
-                        if any(e.entity_type in {EntityType.WOOD_BLOCK, EntityType.ORE_BLOCK} for e in entities):
-                            nearby_destructibles += 1
-                            break
-                        if any(e.entity_type == EntityType.METAL_BLOCK for e in entities):
-                            break
-                if nearby_destructibles > 0:
-                    unit_reward += 0.02 * nearby_destructibles
-
-            # --- Powerup collection ---
-            prev_blast_diameter = prev_unit.blast_diameter
-            curr_blast_diameter = unit.blast_diameter
-            if curr_blast_diameter > prev_blast_diameter:
-                unit_reward += 0.1
-
-            # --- Death penalty for this specific unit ---
-            if not unit.is_alive() and prev_unit.is_alive():
-                unit_reward -= 0.5  # Additional individual death penalty
-
-            unit_rewards[unit_id] = unit_reward
-
-        # For dead units, still provide some reward signal
+        # Handle units that died this tick
         for unit in prev_game_state.my_alive_units:
             if unit.unit_id not in unit_rewards:
-                # Unit died this tick
-                unit_rewards[unit.unit_id] = team_reward - 0.5
+                unit_id = unit.unit_id
+                # Unit died - start with terminal
+                death_reward = terminal
+                # Add any damage this unit dealt before dying
+                death_reward += 0.1 * damage_dealt_by_unit.get(unit_id, 0.0)
+                # Subtract any friendly fire this unit caused
+                death_reward -= 0.12 * friendly_fire_by_unit.get(unit_id, 0.0)
+                # Subtract HP lost (3 HP for death)
+                death_reward -= 0.09 * hp_lost_by_unit.get(unit_id, 0)
+                unit_rewards[unit_id] = max(-1.0, min(1.0, death_reward))
 
         return team_reward, unit_rewards, done
