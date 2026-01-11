@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import datetime as dt
 import json
-import random
 import subprocess
 import sys
 import time
@@ -262,8 +261,7 @@ async def run_arena(agent_a: str, agent_b: str, num_runs: int) -> None:
     REPLAYS_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        for _ in tqdm(range(num_runs), desc="Arena runs"):
-            world_seed = random.randint(1, 1_000_000)
+        for world_seed in tqdm(range(1, num_runs + 1), desc="Arena runs"):
             prng_seed = world_seed
             previous_mtime = REPLAY_PATH.stat().st_mtime if REPLAY_PATH.exists() else 0
             since_ts = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
