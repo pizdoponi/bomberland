@@ -1,229 +1,270 @@
-# AgentEx - Tournament-Competitive Rule-Based Bomberland Agent
+# AgentEx - Rule-Based Bomberland Agent
 
 ## Overview
 
-AgentEx is a sophisticated rule-based agent designed for tournament-level competition in Bomberland. It employs a multi-layered decision-making system that balances offensive and defensive play while adapting to different game phases.
-
-## Strategy Summary
-
-The agent follows a **Safety-First, Opportunity-Driven** approach:
-- Never take actions that lead to certain death (unless sacrificing for a guaranteed kill)
-- Pursue objectives (powerups, enemy kills) only when safe paths exist
-- Adapt behavior based on game phase (early/mid/endgame)
-- Coordinate multiple units to maximize map control and avoid friendly interference
-
-## Detailed Strategy
-
-### 1. Safety-First Decision Making
-
-**Danger Zone Calculation:**
-- Computes all tiles threatened by bombs (considering blast radius)
-- Accounts for chain detonation (bombs triggering other bombs)
-- Tracks bomb timers to know when danger zones will activate/clear
-- Considers worst-case scenario (immediate detonation of armed bombs)
-
-**Safety Priority:**
-```
-If unit is in danger zone:
-    1. Find escape routes outside all blast radii
-    2. Prioritize paths that become safe soonest
-    3. If no escape: consider counter-attack or minimize damage
-```
-
-### 2. Three-Phase Game Strategy
-
-#### Phase 1: Early Game (Ticks 0-100)
-**Focus: Map Control & Powerup Collection**
-
-- **Powerup Hunting**: Actively seek blast powerups (extends bomb range significantly)
-- **Block Breaking**: Clear paths toward center and toward enemy spawn areas
-- **Positioning**: Spread units to control different map quadrants
-- **Conservative Play**: Avoid risky engagements; build advantage through powerups
-
-*Motivation: Blast powerup gives +1 diameter per pickup. Early powerups compound into significant late-game advantage. A unit with diameter 7 vs diameter 3 controls 4x more area.*
-
-#### Phase 2: Mid Game (Ticks 100-200)
-**Focus: Balanced Aggression**
-
-- **Opportunistic Attacks**: Engage enemies when favorable (near walls, limited escape)
-- **Trap Setting**: Place bombs to limit enemy movement options
-- **Territory Control**: Hold advantageous positions (center, near powerups)
-- **Health Management**: Avoid trades when ahead in HP; force trades when behind
-
-*Motivation: Mid-game is about converting early-game advantages into kills while maintaining safety margins before endgame pressure.*
-
-#### Phase 3: Endgame (Ticks 200+)
-**Focus: Survival & Positioning**
-
-- **Center Positioning**: Move toward safe zones as fire spirals inward
-- **Fire Awareness**: Pre-calculate fire spawn locations and timing
-- **Pressure Tactics**: Use shrinking safe zone to force enemy into unfavorable positions
-- **Last Stand Logic**: If cornered, maximize chance of taking enemies down
-
-*Motivation: Fire spawns every 2 ticks from corners toward center. Units caught at edges are eliminated. Center control wins games.*
-
-### 3. Bomb Placement Logic
-
-**Place Bomb When:**
-1. Enemy is within blast range AND cannot escape before detonation
-2. Blocking enemy escape route (trap completion)
-3. Breaking block that leads to valuable powerup
-4. Breaking block to create path toward enemy
-5. Endgame: Creating safe zones / blocking enemy paths
-
-**Never Place Bomb When:**
-1. No clear escape route for own unit
-2. Would block own team's critical path
-3. Enemy has easy escape and own unit is exposed
-4. Already at max concurrent bombs (3 per agent)
-
-**Retreat Planning:**
-```
-Before placing bomb:
-    1. Calculate blast radius
-    2. Verify at least one escape path exists
-    3. Plan retreat moves (radius + 1 tiles minimum)
-    4. Queue: [place_bomb, retreat_move_1, ..., retreat_move_n, wait_for_arm, detonate]
-```
-
-### 4. Detonation Strategy
-
-**Immediate Detonation Triggers:**
-- Enemy unit enters blast zone of armed bomb
-- Chain reaction opportunity (own bomb triggers enemy bomb hitting enemy)
-- Clearing path urgently needed (incoming fire/danger)
-
-**Delayed Detonation:**
-- Wait for enemy to move into blast zone
-- Time with enemy's movement patterns
-- Coordinate with other unit's bomb for crossfire
-
-### 5. Pathfinding System
-
-**Danger-Aware A* Search:**
-```python
-Cost(tile) = base_cost + danger_penalty + destruction_cost
-
-base_cost = 1 (empty) or INF (solid block)
-danger_penalty =
-    - 0: safe tile
-    - 100: in bomb blast zone (armed)
-    - 50: in bomb blast zone (not yet armed)
-    - INF: active blast/fire
-destruction_cost =
-    - 6 * HP: for destructible blocks (wood=1, ore=3)
-    - Accounts for: bomb placement + retreat + detonate + return
-```
-
-### 6. Enemy Targeting
-
-**Target Assignment Algorithm:**
-1. Calculate shortest paths from each of my units to each enemy unit
-2. Use Hungarian algorithm-style matching to minimize total distance
-3. Prefer wounded enemies (lower HP = easier elimination)
-4. Redistribute targets if an enemy is eliminated
-
-**Engagement Rules:**
-- Minimum 2-tile approach before bombing (prevents mutual destruction)
-- Prefer attacking enemies near walls/corners (limited escape)
-- Avoid chasing enemies through narrow corridors (trap risk)
-
-### 7. Unit Coordination
-
-**Collision Avoidance:**
-- Track intended next positions for all friendly units
-- If two units want same tile, lower-priority unit waits or reroutes
-- Priority: escaping danger > completing attack > collecting powerup > exploring
-
-**Spatial Distribution:**
-- Penalize paths that cluster units together
-- Ideal: triangular formation covering max area
-- Benefit: harder for enemy to hit multiple units with one bomb
-
-### 8. Powerup Evaluation
-
-**Powerup Value Scoring:**
-```
-score = base_value / (distance + 1) * reachability_factor
-
-base_value:
-    - Blast Powerup: 100 (permanent advantage)
-    - Freeze Powerup: 60 (temporary but powerful)
-
-reachability_factor:
-    - 1.0: clear safe path
-    - 0.5: path through danger zones
-    - 0.0: powerup expires before reachable
-```
-
-### 9. Chain Detonation Exploitation
-
-**Offensive Chains:**
-- Place bombs adjacent to enemy bombs
-- Detonate own bomb to trigger enemy bomb
-- Can extend effective blast range significantly
-
-**Defensive Awareness:**
-- Track all bombs that could trigger own bombs
-- Factor chain reactions into danger zone calculations
-- Avoid positions where enemy can trigger chain hitting own unit
-
-### 10. Endgame Fire Handling
-
-**Fire Spiral Pattern:**
-```
-Fire spawns at ticks: 200, 202, 204, ... (every 2 ticks)
-Pattern: Starts top-left and bottom-right corners
-        Spirals horizontally first, then vertically
-        Converges on center (7,7)
-```
-
-**Survival Strategy:**
-- Maintain positions at least 2 moves ahead of fire line
-- Calculate fire arrival times for each tile
-- Prefer center-adjacent positions as fire closes in
-- Use fire to pressure enemies into bombs or each other
+AgentEx is a rule-based agent for Bomberland that prioritizes safety while pursuing strategic objectives. It uses a layered decision-making architecture that adapts to different game phases.
 
 ## Architecture
 
 ```
 agentex/
-    agent.py          # Main agent logic and game loop
-    strategy.py       # High-level decision making
-    danger.py         # Danger zone calculation
-    pathfinding.py    # A* with danger awareness
-    targeting.py      # Enemy targeting and assignment
-    bomb_logic.py     # Bomb placement and detonation
-    endgame.py        # Fire tracking and endgame behavior
-    utils.py          # Helper functions
+    agent.py          # Main agent class and game loop
+    strategy.py       # High-level decision making and target assignment
+    danger.py         # Danger zone calculation and escape route planning
+    pathfinding.py    # Danger-aware A* pathfinding
+    bomb_logic.py     # Bomb placement evaluation and detonation timing
+    endgame.py        # Fire tracking and endgame positioning
+    utils.py          # Helper functions (distance, direction, entity queries)
+    types_.py         # Type definitions for game state, actions, entities
+    game_state.py     # WebSocket client for game server communication
 ```
 
-## Key Improvements Over Kamikaze Agent
+## Decision Priority System
 
-| Aspect | Kamikaze | AgentEx |
-|--------|----------|---------|
-| Safety | Basic retreat path | Full danger zone modeling |
-| Powerups | Ignored | Priority collection |
-| Pathfinding | Simple Dijkstra | Danger-aware A* |
-| Endgame | No adaptation | Fire-aware positioning |
-| Coordination | Independent units | Coordinated targeting |
-| Bomb Timing | Immediate detonate | Strategic timing |
+Each tick, the agent evaluates actions for each unit in strict priority order:
 
-## Performance Expectations
+### Priority 1: Escape Danger (Highest)
+If a unit is in a danger zone (bomb blast radius, active blast, or fire):
+1. Use BFS to find the shortest path to any safe tile
+2. Move along the escape path immediately
+3. If no escape exists, attempt to detonate a bomb (take enemy down with us)
 
-- **vs Random Agent**: ~99% win rate
-- **vs Kamikaze Agent**: ~80%+ win rate
-- **vs Similar Rule-Based**: Competitive (depends on specific strategies)
-- **vs RL Agents**: Competitive in many cases (rule-based can exploit known patterns)
+### Priority 2: Detonate for Kill
+Check if any armed bomb owned by this unit can hit an enemy:
+- Verify enemy is in blast zone and not invulnerable
+- Verify unit is NOT in blast zone (or is invulnerable)
+- Verify no friendly units would be hit
+- If all conditions met, detonate immediately
 
-## Configuration
+### Priority 3: Endgame Survival (Tick 200+)
+When fire phase begins:
+- Prioritize moving toward center/away from fire
+- Calculate fire arrival times for each tile
+- Path toward tiles with maximum time until fire arrives
 
-The agent's behavior can be tuned via constants in `strategy.py`:
-- `EARLY_GAME_END_TICK`: When to transition from early to mid game
-- `ENDGAME_START_TICK`: When fire phase begins
-- `DANGER_PENALTY_ARMED`: Cost for entering armed bomb zone
-- `POWERUP_VALUE_BLAST`: Base value of blast powerups
-- `MIN_ESCAPE_DISTANCE`: Minimum retreat distance before bombing
+### Priority 4: Strategic Actions
+Use pre-computed decisions from the StrategyManager:
+- **Move**: Follow path toward assigned target
+- **Bomb**: Place bomb if escape path exists and valuable target in blast zone
+- **Wait**: Hold position if blocked or no valid action
+
+### Priority 5: Fallback
+If no strategic decision available:
+1. Try to pathfind toward nearest enemy
+2. If blocked by destructible block, bomb to clear path
+3. Find any safe tile to move toward
+4. Move to any valid adjacent tile
+
+## Danger Zone System (`danger.py`)
+
+### DangerMap Class
+Pre-computes all danger zones for the current tick:
+
+**Tracked Dangers:**
+- Active blasts (immediate danger)
+- Bomb blast zones (considers blast radius and direction)
+- Chain detonations (bombs triggering other bombs)
+- Endgame fire (permanent, no expiration)
+
+**Danger Timing:**
+```python
+DangerInfo:
+    danger_start_tick  # When bomb becomes armed (created + 5 ticks)
+    danger_end_tick    # When blast clears (explode + 5 ticks)
+```
+
+**Danger Levels:**
+- 0: Safe tile
+- 50: In bomb zone, bomb not yet armed
+- 100: In armed bomb zone
+- 1000 (INF): Active blast or fire
+
+### Escape Route Calculation
+```python
+can_escape_after_bomb(unit, bomb_position, max_escape_moves=3):
+    # BFS from unit position
+    # Must reach tile outside BOTH:
+    #   - The new bomb's hypothetical blast zone
+    #   - Any existing danger zones
+    # Within max_escape_moves (default 3)
+```
+
+## Pathfinding System (`pathfinding.py`)
+
+### Danger-Aware A*
+```python
+Cost(tile) = base_cost + danger_penalty + destruction_cost
+
+base_cost = 1 (empty tile)
+danger_penalty = danger_level (0, 50, 100, or INF)
+destruction_cost = 6 * block_hp (if allow_destruction=True)
+    # wood = 1 HP, ore = 3 HP
+    # 6 accounts for: place bomb + retreat + arm time + detonate + return
+```
+
+**Parameters:**
+- `avoid_units`: Skip tiles with other units
+- `avoid_danger`: Apply danger penalties
+- `allow_destruction`: Include paths through destructible blocks
+- `max_cost`: Limit maximum acceptable path cost
+- `excluded_positions`: Additional tiles to avoid
+
+### Key Functions
+- `find_path()`: A* from start to specific goal
+- `find_path_to_any()`: Find shortest path to any goal in a list
+- `find_escape_path()`: BFS to find shortest path to ANY safe tile
+- `find_safe_tiles()`: Get all safe reachable tiles within distance
+
+## Strategy Manager (`strategy.py`)
+
+### Game Phases
+```python
+EARLY_GAME:   tick < 100   # Focus on powerups
+MID_GAME:     100 <= tick < 200  # Balanced offense
+ENDGAME:      tick >= 200  # Survival priority
+```
+
+### Target Evaluation
+
+**Powerup Scoring:**
+```python
+base_value:
+    BLAST_POWERUP = 100
+    FREEZE_POWERUP = 60
+
+score = base_value / (path_cost + 1) * reachability_factor
+
+reachability_factor:
+    1.0 if safe path
+    0.5 if path through danger
+    0.0 if powerup expires before reachable
+
+Early game multiplier: 1.5x
+```
+
+**Enemy Scoring:**
+```python
+base_value = 80 + (30 * missing_hp)  # Wounded enemies more valuable
+
+score = base_value / (path_cost + 1) * path_type_factor
+
+path_type_factor:
+    1.0 for direct walkable path
+    0.8 for path requiring block destruction
+
+Mid/Endgame multiplier: 1.3x
+```
+
+### Target Assignment
+Greedy assignment algorithm:
+1. Collect all (unit, target, value) tuples
+2. Sort by value (highest first)
+3. Assign targets avoiding duplicates for non-enemy targets
+4. Multiple units can target same enemy
+
+### Unit Decisions
+Decision types:
+- `escape`: Move along escape path (highest priority)
+- `move`: Move toward assigned target
+- `bomb`: Place bomb at current position
+- `detonate`: Detonate specific bomb
+- `wait`: Do nothing this tick
+
+## Bomb Logic (`bomb_logic.py`)
+
+### Bomb Placement Conditions
+A bomb is placed only when ALL conditions are true:
+1. Agent has <3 active bombs (engine limit)
+2. No bomb already at unit's position
+3. Escape path exists (≤3 moves to safety)
+4. No friendly units in blast zone
+5. Something valuable in blast zone (enemy or destructible block)
+
+### Blast Calculation
+```python
+blast_radius = (unit.blast_diameter - 1) // 2
+
+# Blast extends in 4 cardinal directions
+# Stops when hitting any block (including destructible)
+# Default diameter = 3 (radius = 1)
+```
+
+### Detonation Timing
+**Immediate Detonation Triggers:**
+- Enemy enters armed bomb's blast zone
+- Unit is safe from own blast
+- No friendly units in blast zone
+
+**Bomb Timeline:**
+- Created: bomb placed
+- Armed: created + 5 ticks (can be detonated)
+- Auto-explode: created + 30 ticks (expires)
+- Blast duration: 5 ticks
+
+## Endgame Fire Handling (`endgame.py`)
+
+### Fire Spiral Pattern
+```
+Fire starts: tick 200
+Spawn interval: every 2 ticks
+Pattern: Spirals inward from corners toward center (7,7)
+    - Starts at edges (layer 0)
+    - Each layer moves inward
+    - Horizontal edges first, then vertical
+```
+
+### Survival Strategy
+```python
+should_prioritize_survival():
+    if tick < 200: return False
+    if safe_tiles < 50: return True
+    if any unit has fire arriving in ≤5 ticks: return True
+```
+
+### Target Position Selection
+Tiles scored by:
+1. Maximum time until fire arrives (primary)
+2. Distance to center (tiebreaker - closer is better)
+
+## Unit Coordination
+
+### Position Reservation
+- Track intended positions for all friendly units
+- If two units want same tile, lower-priority unit waits
+- Priority order: escape > attack > collect > explore
+
+### Collision Avoidance
+- Skip positions occupied by other units in pathfinding
+- Reserved positions blocked from subsequent decisions
+- Units process in priority order each tick
+
+## Key Constants
+
+```python
+# Timing
+BOMB_ARMED_TICKS = 5
+BOMB_DURATION_TICKS = 30
+BLAST_DURATION_TICKS = 5
+ENDGAME_START_TICK = 200
+FIRE_SPAWN_INTERVAL = 2
+
+# Limits
+MAX_BOMBS_PER_AGENT = 3
+
+# Pathfinding costs
+COST_MOVE_EMPTY = 1
+COST_DESTROY_PER_HP = 6
+COST_DANGER_ARMED = 100
+COST_DANGER_UNARMED = 50
+COST_DANGER_ACTIVE = infinity
+
+# Strategy weights
+POWERUP_VALUE_BLAST = 100
+POWERUP_VALUE_FREEZE = 60
+ENEMY_VALUE_BASE = 80
+ENEMY_VALUE_PER_MISSING_HP = 30
+EARLY_GAME_END_TICK = 100
+```
 
 ## Running the Agent
 
@@ -233,11 +274,15 @@ docker-compose up --abort-on-container-exit --force-recreate
 
 # Direct Python execution (for development)
 cd agents/agentex
+pip install -r requirements.txt
 python agent.py
+
+# With custom connection string
+GAME_CONNECTION_STRING="ws://127.0.0.1:3000/?role=agent&agentId=agentId&name=agentex" python agent.py
 ```
 
 ## Dependencies
 
 - Python 3.8+
-- websockets
-- No external ML libraries required (pure rule-based)
+- websockets (async WebSocket client)
+- No external ML libraries (pure rule-based)
