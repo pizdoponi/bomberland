@@ -219,6 +219,38 @@ def resolve_winner_name(
     return str(winner_id)
 
 
+def extract_total_ticks(endgame_payload: Dict[str, Any]) -> int:
+    history = endgame_payload.get("history") or []
+    if not history:
+        return 0
+    last_tick = history[-1].get("tick")
+    if isinstance(last_tick, int):
+        return last_tick
+    return 0
+
+
+def print_summary(
+    agent_a: str,
+    agent_b: str,
+    win_counts: Dict[str, int],
+    tick_counts: List[int],
+    total_runs: int,
+) -> None:
+    print("\nArena summary")
+    print(f"Total games: {total_runs}")
+    for name in (agent_a, agent_b, "draw"):
+        count = win_counts.get(name, 0)
+        percentage = (count / total_runs) * 100
+        print(f"{name}: {count} ({percentage:.1f}%)")
+    if tick_counts:
+        avg_ticks = sum(tick_counts) / len(tick_counts)
+        print(
+            "Ticks: avg {:.1f}, min {}, max {}".format(
+                avg_ticks, min(tick_counts), max(tick_counts)
+            )
+        )
+
+
 async def run_arena(agent_a: str, agent_b: str, num_runs: int) -> None:
     services = parse_base_compose()
     agent_a_service = resolve_agent_service(agent_a, services)
@@ -260,6 +292,9 @@ async def run_arena(agent_a: str, agent_b: str, num_runs: int) -> None:
 
     REPLAYS_DIR.mkdir(parents=True, exist_ok=True)
 
+    win_counts: Dict[str, int] = {}
+    tick_counts: List[int] = []
+
     try:
         for world_seed in tqdm(range(1, num_runs + 1), desc="Arena runs"):
             prng_seed = world_seed
@@ -286,9 +321,13 @@ async def run_arena(agent_a: str, agent_b: str, num_runs: int) -> None:
                 )
             save_logs(compose_path, since_ts, run_dir / "logs.log")
             winner_name = resolve_winner_name(endgame_payload, agent_a, agent_b)
+            win_counts[winner_name] = win_counts.get(winner_name, 0) + 1
+            tick_counts.append(extract_total_ticks(endgame_payload))
             (run_dir / "winner").write_text(f"{winner_name}\n")
     finally:
         await ws.close()
+        if win_counts:
+            print_summary(agent_a, agent_b, win_counts, tick_counts, num_runs)
 
 
 def main() -> None:
