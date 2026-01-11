@@ -9,22 +9,22 @@ import torch
 class DQNConfig:
     # Exploration parameters
     epsilon_start: float = 1.0
-    epsilon_min: float = 0.05
-    epsilon_decay: float = 0.999990  # Math: 0.999990^300000 ≈ 0.05
+    epsilon_min: float = 0.1
+    epsilon_decay: float = 0.999995
 
     # Learning parameters
     gamma: float = 0.99
     batch_size: int = 2048
-    replay_capacity: int = 300_000  # Large buffer to retain diverse experiences across ε values
-    warmup_steps: int = 5_000
-    learning_rate: float = 0.0003  # Slightly conservative for stability
-    train_every_n_steps: int = 8  # 1 gradient update per 8 env steps (maintains ratio with 2x batch)
+    replay_capacity: int = 500_000
+    warmup_steps: int = 10_000
+    learning_rate: float = 0.001
+    train_every_n_steps: int = 4
 
     # Prioritized Experience Replay (PER) parameters
     per_alpha: float = 0.6  # Priority exponent (0=uniform, 1=full prioritization)
     per_beta_start: float = 0.4  # Importance sampling start (low = more prioritization)
     per_beta_end: float = 1.0  # Importance sampling end (1.0 = full correction)
-    per_beta_steps: int = 1_000_000  # Steps to anneal beta (should match max_steps)
+    per_beta_steps: int = 2_000_000  # Steps to anneal beta (should match max_steps)
     per_epsilon: float = 1e-6  # Small constant to ensure non-zero priority
 
     # Network architecture
@@ -60,7 +60,7 @@ class DQNConfig:
     device: str = "cuda"
 
     # Training control
-    max_steps: int = 1_000_000
+    max_steps: int = 2_000_000
     eval_interval: int = 10_000
     eval_games: int = 20
 
