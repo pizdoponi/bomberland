@@ -19,6 +19,7 @@ BASE_COMPOSE = ROOT_DIR / "base-compose.yml"
 REPLAYS_DIR = ROOT_DIR / "replays"
 DEFAULT_ADMIN_WS = "ws://127.0.0.1:3000/?role=admin"
 REPLAY_PATH = ROOT_DIR / "agents" / "replay.json"
+AGENT_SECRET_ID_MAP = {"agentA": "a", "agentB": "b"}
 
 
 def run_command(
@@ -102,7 +103,6 @@ services:
             - 3000:3000
         environment:
             - ADMIN_ROLE_ENABLED=1
-            - AGENT_ID_MAPPING=agentA,agentB
             - INITIAL_HP=3
             - PRNG_SEED=1234
             - SHUTDOWN_ON_GAME_END_ENABLED=0
@@ -156,26 +156,86 @@ networks:
 """
 
 
-async def connect_admin(url: str) -> Any:
+async def connect_admin(url: str, retries: int = 30, retry_delay_s: float = 1.0) -> Any:
     try:
         import websockets
+        from websockets.exceptions import InvalidHandshake, InvalidURI, WebSocketException
     except ImportError:
         raise RuntimeError(
             "Missing dependency: websockets. Install with `pip install websockets`."
         )
-    return await websockets.connect(url)
+    last_error: Optional[Exception] = None
+    for attempt in range(1, retries + 1):
+        try:
+            return await websockets.connect(url)
+        except (OSError, InvalidHandshake, InvalidURI, WebSocketException) as exc:
+            last_error = exc
+            if attempt == retries:
+                break
+            await asyncio.sleep(retry_delay_s)
+    raise RuntimeError(f"Failed to connect to admin websocket at {url}: {last_error}") from last_error
 
 
-async def wait_for_endgame(ws: Any, timeout_s: int) -> Dict[str, Any]:
+async def drain_messages(ws: Any, timeout_s: float = 0.1) -> None:
+    while True:
+        try:
+            await asyncio.wait_for(ws.recv(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            return
+
+
+async def wait_for_endgame(
+    ws: Any,
+    timeout_s: int,
+    previous_game_id: Optional[str],
+) -> tuple[Dict[str, Any], int]:
     end_time = time.time() + timeout_s
+    started = False
+    last_tick = 0
+    current_game_id = None
     while True:
         remaining = end_time - time.time()
         if remaining <= 0:
             raise TimeoutError("Timed out waiting for endgame_state.")
         raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
         data = json.loads(raw)
-        if data.get("type") == "endgame_state":
-            return data.get("payload") or {}
+        data_type = data.get("type")
+        if data_type == "game_state":
+            payload = data.get("payload") or {}
+            game_id = payload.get("game_id")
+            tick = payload.get("tick")
+            if game_id and game_id != previous_game_id:
+                current_game_id = game_id
+                started = True
+            elif previous_game_id is None and game_id:
+                current_game_id = game_id
+                started = True
+            if started and isinstance(tick, int):
+                last_tick = max(last_tick, tick)
+            continue
+        if data_type == "tick":
+            payload = data.get("payload") or {}
+            tick = payload.get("tick")
+            if isinstance(tick, int):
+                if not started and (tick <= 1 or previous_game_id is None):
+                    started = True
+                if started:
+                    last_tick = max(last_tick, tick)
+            continue
+        if data_type == "endgame_state":
+            payload = data.get("payload") or {}
+            endgame_game_id = payload.get("initial_state", {}).get("game_id")
+            if not started:
+                if previous_game_id and endgame_game_id == previous_game_id:
+                    continue
+                return payload, last_tick
+            if (
+                current_game_id
+                and endgame_game_id
+                and endgame_game_id != current_game_id
+            ):
+                continue
+            return payload, last_tick
 
 
 def wait_for_replay_update(previous_mtime: float, timeout_s: int = 10) -> bool:
@@ -212,11 +272,15 @@ def resolve_winner_name(
     winner_id = endgame_payload.get("winning_agent_id")
     if winner_id is None:
         return "draw"
-    if winner_id == "agentA":
-        return agent_a
-    if winner_id == "agentB":
-        return agent_b
-    return str(winner_id)
+    winner_map = {
+        AGENT_SECRET_ID_MAP.get("agentA"): agent_a,
+        AGENT_SECRET_ID_MAP.get("agentB"): agent_b,
+        "agentA": agent_a,
+        "agentB": agent_b,
+        "a": agent_a,
+        "b": agent_b,
+    }
+    return winner_map.get(winner_id, str(winner_id))
 
 
 def extract_total_ticks(endgame_payload: Dict[str, Any]) -> int:
@@ -294,19 +358,23 @@ async def run_arena(agent_a: str, agent_b: str, num_runs: int) -> None:
 
     win_counts: Dict[str, int] = {}
     tick_counts: List[int] = []
+    last_game_id: Optional[str] = None
 
     try:
         for world_seed in tqdm(range(1, num_runs + 1), desc="Arena runs"):
             prng_seed = world_seed
             previous_mtime = REPLAY_PATH.stat().st_mtime if REPLAY_PATH.exists() else 0
             since_ts = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
+            await drain_messages(ws)
             reset_packet = {
                 "type": "request_game_reset",
                 "world_seed": world_seed,
                 "prng_seed": prng_seed,
             }
             await ws.send(json.dumps(reset_packet))
-            endgame_payload = await wait_for_endgame(ws, timeout_s=600)
+            endgame_payload, observed_last_tick = await wait_for_endgame(
+                ws, timeout_s=600, previous_game_id=last_game_id
+            )
 
             replay_ready = wait_for_replay_update(previous_mtime)
             run_dir = REPLAYS_DIR / f"{agent_a}_{agent_b}_{world_seed}"
@@ -322,8 +390,10 @@ async def run_arena(agent_a: str, agent_b: str, num_runs: int) -> None:
             save_logs(compose_path, since_ts, run_dir / "logs.log")
             winner_name = resolve_winner_name(endgame_payload, agent_a, agent_b)
             win_counts[winner_name] = win_counts.get(winner_name, 0) + 1
-            tick_counts.append(extract_total_ticks(endgame_payload))
+            total_ticks = observed_last_tick or extract_total_ticks(endgame_payload)
+            tick_counts.append(total_ticks)
             (run_dir / "winner").write_text(f"{winner_name}\n")
+            last_game_id = endgame_payload.get("initial_state", {}).get("game_id")
     finally:
         await ws.close()
         if win_counts:
